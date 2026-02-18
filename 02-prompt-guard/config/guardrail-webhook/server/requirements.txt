@@ -1,0 +1,6 @@
+fastapi>=0.109,<1
+uvicorn>=0.27,<1
+pydantic>=2.6,<3
+
+opik>=1.0
+nltk>=3.9

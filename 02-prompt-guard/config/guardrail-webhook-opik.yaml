@@ -1,0 +1,197 @@
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+# --- Feature: providers ---
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-4o-mini
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            value: /openai
+      backendRefs:
+        - name: openai
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+
+# --- Feature: guardrail-webhook ---
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-guardrail
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: guardrail-webhook
+    account: ai-guardrail
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opik-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: guardrail-webhook
+stringData:
+  api-key: <set OPIK_API_KEY>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-guardrail-webhook
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: guardrail-webhook
+    app: ai-guardrail
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-guardrail-webhook
+  template:
+    metadata:
+      labels:
+        app: ai-guardrail-webhook
+    spec:
+      serviceAccountName: ai-guardrail
+      containers:
+        - name: webhook
+          image: opik-guardrail-webhook:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: OPIK_PROJECT_NAME
+              value: agentgateway-guardrails
+            - name: OPIK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opik-secret
+                  key: api-key
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-guardrail-webhook
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: guardrail-webhook
+    app: ai-guardrail
+spec:
+  selector:
+    app: ai-guardrail-webhook
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: guardrail-webhook
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: guardrail-webhook
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: openai
+  backend:
+    ai:
+      promptGuard:
+        request:
+          - webhook: &ref_0
+              backendRef:
+                name: ai-guardrail-webhook
+                namespace: agentgateway-system
+                kind: Service
+                port: 8000
+        response:
+          - webhook: *ref_0
