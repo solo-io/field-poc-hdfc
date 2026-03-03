@@ -9,8 +9,8 @@ This is a proof-of-concept for a customer POC. It is not intended to be a produc
 | 1 | [LLM Body-Based Routing](#1-llm-body-based-routing) | Body-based routing, multi-provider dispatch | ✅ Ready | [`01-llm-routing/`](./01-llm-routing/) |
 | 2 | [Prompt Guarding](#2-prompt-guarding) | Webhook guard + Opik evaluation & tracing | ✅ Ready | [`02-prompt-guard/`](./02-prompt-guard/) |
 | 3 | [Cost Control & Rate Limits](#3-cost-control--rate-limits) | Token-based local rate limits | 🔜 Planned | [`03-cost-control/`](./03-cost-control/) |
-| 4 | [RBAC](#4-rbac) | JWT claims + CEL authorization rules | 🔜 Planned | [`04-rbac/`](./04-rbac/) |
-| 5 | [Access Policies](#5-access-policies) | OIDC / Microsoft Entra ID | 🔜 Planned | [`05-access-policies/`](./05-access-policies/) |
+| 4 | [Authentication & RBAC](#4-authentication--rbac) | OIDC/Keycloak, JWT auth, workload identity, CEL RBAC | ✅ Ready | [`04-auth/`](./04-auth/) |
+| 5 | [Microsoft Entra ID](#5-microsoft-entra-id) | Azure AD / Entra ID integration | 🔜 Planned | [`05-entra-id/`](./05-entra-id/) |
 | 6 | [Observability](#6-observability) | OpenTelemetry, Prometheus, access logging | 🔜 Planned | [`06-observability/`](./06-observability/) |
 
 ---
@@ -54,21 +54,31 @@ Intended coverage: token-based rate limiting enforced at the gateway to prevent 
 
 → [`03-cost-control/`](./03-cost-control/)
 
-### 4. RBAC
+### 4. Authentication & RBAC
+
+Demonstrates OIDC-based authentication using **Keycloak** as the identity provider, with a two-hop workload identity chain where every agent authenticates **as itself** at each gateway boundary. Each workload exchanges its auto-mounted Kubernetes ServiceAccount JWT for a Keycloak access token via RFC 8693 token exchange — **no long-lived secrets**, no token delegation.
+
+**Architecture:**
+- **Hop 1:** Caller Agent → AGW → Stock Agent (`azp=chain-caller-agent`)
+- **Hop 2:** Stock Agent → AGW → MCP (`azp=chain-stock-agent`)
+
+**Key Features:**
+- OIDC integration with Keycloak for token issuance and validation
+- JWT authentication enforced at each HTTPRoute boundary
+- CEL-based tool-level RBAC on MCP backend (`jwt.azp == "chain-stock-agent" && mcp.tool.name == "get_stock_price"`)
+- Kubernetes ServiceAccount → OIDC token exchange (RFC 8693)
+- Blast radius isolation — compromised caller cannot reach MCP directly
+- Independent audit trails per hop
+
+→ [`04-auth/`](./04-auth/)
+
+### 5. Microsoft Entra ID
 
 > 🔜 **Planned** — directory is empty.
 
-Intended coverage: fine-grained access control using JWT claims evaluated with CEL (Common Expression Language) to gate access to routes and models based on caller identity and role.
+Intended coverage: gateway-level authentication using **Microsoft Entra ID** (formerly Azure AD) as the enterprise identity provider. Demonstrates JWT validation with Entra ID-issued tokens, Azure Workload Identity integration, and role-based access control using Entra ID groups/roles.
 
-→ [`04-rbac/`](./04-rbac/)
-
-### 5. Access Policies
-
-> 🔜 **Planned** — directory is empty.
-
-Intended coverage: gateway-level authentication using OIDC / JWT and Microsoft Entra ID (Azure AD) for both downstream caller validation and upstream provider auth.
-
-→ [`05-access-policies/`](./05-access-policies/)
+→ [`05-entra-id/`](./05-entra-id/)
 
 ### 6. Observability
 

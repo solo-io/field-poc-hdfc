@@ -1,0 +1,104 @@
+# Feature: mcp-server
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stock-server-mcp
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-server
+    account: mcp-stock-server
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stock-server-mcp
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-server
+    app: stock-server-mcp
+  annotations:
+    kgateway.dev/mcp-path: /mcp
+spec:
+  selector:
+    app: stock-server-mcp
+  ports:
+    - port: 80
+      targetPort: 8000
+      appProtocol: kgateway.dev/mcp
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-server-mcp
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-server
+    app: stock-server-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-server-mcp
+  template:
+    metadata:
+      labels:
+        app: stock-server-mcp
+    spec:
+      serviceAccountName: stock-server-mcp
+      containers:
+        - name: server
+          image: stock-server-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MCP_TRANSPORT
+              value: streamable-http
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-backend
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-server
+spec:
+  mcp:
+    targets:
+      - name: mcp-target
+        static:
+          host: stock-server-mcp.agentgateway-system.svc.cluster.local
+          port: 80
+          protocol: StreamableHTTP
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-server
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - backendRefs:
+        - name: mcp-backend
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+      matches:
+        - path:
+            type: PathPrefix
+            value: /mcp

@@ -1,0 +1,97 @@
+# EnterpriseAgentgatewayPolicy Resources
+# JWT Authentication and MCP Tool Access policies
+
+# JWT Authentication for stock-agent route
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: jwt-auth-stock-agent
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: obo-token-exchange
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: obo-token-exchange
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: stock-agent
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: http://keycloak.keycloak.svc.cluster.local:8080/realms/agw-dev
+          audiences:
+            - agentgateway
+          jwks:
+            remote:
+              jwksPath: realms/agw-dev/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: ""
+                kind: Service
+                name: keycloak
+                namespace: keycloak
+                port: 8080
+
+# JWT Authentication for mcp route
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: jwt-auth-mcp
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: obo-token-exchange
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: obo-token-exchange
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: mcp
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: http://keycloak.keycloak.svc.cluster.local:8080/realms/agw-dev
+          audiences:
+            - agentgateway
+          jwks:
+            remote:
+              jwksPath: realms/agw-dev/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: ""
+                kind: Service
+                name: keycloak
+                namespace: keycloak
+                port: 8080
+
+# MCP Tool Access Authorization
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: mcp-tool-access
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: mcp-tool-access
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: mcp-tool-access
+spec:
+  targetRefs:
+    - group: agentgateway.dev
+      kind: AgentgatewayBackend
+      name: mcp-backend
+  backend:
+    mcp:
+      authorization:
+        action: Allow
+        policy:
+          matchExpressions:
+            - jwt.azp == "chain-stock-agent" && mcp.tool.name == "get_stock_price"

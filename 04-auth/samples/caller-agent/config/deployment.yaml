@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caller-agent
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: workload-agent
+    app: caller-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caller-agent
+  template:
+    metadata:
+      labels:
+        app: caller-agent
+    spec:
+      serviceAccountName: caller-agent
+      containers:
+        - name: agent
+          image: caller-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KEYCLOAK_URL
+              value: "http://keycloak.keycloak.svc.cluster.local:8080"
+            - name: KEYCLOAK_REALM
+              value: "agw-dev"
+            - name: CLIENT_ID
+              value: "caller-agent"
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: caller-agent-credentials
+                  key: client_secret
+            - name: AUDIENCE
+              value: "agentgateway"
+            - name: STOCK_AGENT_URL
+              value: "http://agentgateway.agentgateway-system.svc.cluster.local:8080/agent/run"
+            # Set USE_TOKEN_EXCHANGE=true and add the projected volume below for Phase 2
+            - name: USE_TOKEN_EXCHANGE
+              value: "false"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      # Phase 2: uncomment to mount the projected ServiceAccount token
+      # The token is projected with audience=agentgateway so Keycloak can
+      # validate it against the cluster OIDC issuer during token exchange.
+      # volumes:
+      #   - name: sa-token
+      #     projected:
+      #       sources:
+      #         - serviceAccountToken:
+      #             path: sa-token
+      #             expirationSeconds: 3600
+      #             audience: agentgateway
+      # Add to container:
+      # - name: USE_TOKEN_EXCHANGE
+      #   value: "true"
+      # - name: SA_TOKEN_PATH
+      #   value: /var/run/secrets/tokens/sa-token
+      # volumeMounts:
+      #   - name: sa-token
+      #     mountPath: /var/run/secrets/tokens
+      #     readOnly: true

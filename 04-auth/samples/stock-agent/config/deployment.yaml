@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-agent
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: stock-agent
+    app: stock-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-agent
+  template:
+    metadata:
+      labels:
+        app: stock-agent
+    spec:
+      serviceAccountName: stock-agent
+      containers:
+        - name: agent
+          image: stock-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MODEL
+              value: "gemini-2.0-flash"
+            - name: LLM_BASE_URL
+              value: "http://agentgateway.agentgateway-system.svc.cluster.local:8080/openai"
+            - name: MCP_URL
+              value: "http://agentgateway.agentgateway-system.svc.cluster.local:8080/mcp"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30

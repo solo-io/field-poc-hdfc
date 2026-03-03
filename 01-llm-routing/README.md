@@ -6,6 +6,8 @@ Route incoming requests to different LLM backends based on the **`model` field i
 
 ## Architecture
 
+![](images/bbr.png)
+
 ```
 Client Request
     │  body: { "model": "..." }
