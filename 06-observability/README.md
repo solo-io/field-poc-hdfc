@@ -14,7 +14,6 @@ The `config/` folder contains pre-built Grafana dashboards for monitoring Agent 
 | **Performance** | `agentgateway-performance.json` | Resource metrics: CPU, memory, connections, Tokio runtime stats, network bandwidth |
 | **Control Plane** | `agentgateway-control-plane.json` | Control plane health: replicas, restarts, XDS auth success rate, reconciliation status |
 | **Cost Estimation** | `agentgateway-cost.json` | Token-based cost analysis: usage aggregation, cost rate, projected monthly costs by model |
-| **Budget & Cost** | `agentgateway-budget.json` | Budget monitoring with configurable pricing: cost estimation, cost breakdown by model |
 | **Budget Enforcement** | `agentgateway-budget-enforcement.json` | Budget policy enforcement: denials, utilization, remaining budget, decisions by entity |
 
 ### Importing Dashboards

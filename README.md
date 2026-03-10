@@ -100,7 +100,6 @@ Pre-built Grafana dashboards for monitoring Agent Gateway:
 | **Performance** | CPU, memory, connections, Tokio runtime stats, network bandwidth |
 | **Control Plane** | Replicas, restarts, XDS auth success rate, reconciliation status |
 | **Cost Estimation** | Token-based cost analysis, projected monthly costs by model |
-| **Budget & Cost** | Budget monitoring with configurable pricing |
 | **Budget Enforcement** | Denials, utilization, remaining budget, decisions by entity |
 
 → [`06-observability/`](./06-observability/)
