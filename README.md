@@ -49,9 +49,18 @@ Inspect every prompt before it reaches the LLM and every response before it retu
 
 ### 3. Cost Control & Rate Limits
 
-> 🔜 **Planned** — directory is empty.
+Budget management service with ext-proc enforcement at the gateway. Components include:
 
-Intended coverage: token-based rate limiting enforced at the gateway to prevent runaway billing and denial-of-wallet attacks.
+- **Budget Management Service** — ext-proc that calculates costs and enforces budgets in real-time
+- **PostgreSQL** — Stores budget definitions, usage records, and model pricing
+- **OIDC-Protected UI** — Web interface for managing budgets and viewing usage
+
+**Features:**
+- Real-time cost tracking (token usage → USD)
+- Budget enforcement with request blocking when exhausted
+- Hierarchical budgets (org-level, team-level)
+- Warning thresholds (default: 80%)
+- Prometheus metrics for monitoring
 
 → [`03-cost-control/`](./03-cost-control/)
 
@@ -83,9 +92,16 @@ Intended coverage: gateway-level authentication using **Microsoft Entra ID** (fo
 
 ### 6. Observability
 
-> 🔜 **Planned** — directory is empty.
+Pre-built Grafana dashboards for monitoring Agent Gateway:
 
-Intended coverage: OpenTelemetry distributed traces with LLM-specific spans, Prometheus metrics, and structured access logging enriched with model and identity context.
+| Dashboard | Description |
+|-----------|-------------|
+| **Overview** | Request rates, latency percentiles, error rates, token usage by model |
+| **Performance** | CPU, memory, connections, Tokio runtime stats, network bandwidth |
+| **Control Plane** | Replicas, restarts, XDS auth success rate, reconciliation status |
+| **Cost Estimation** | Token-based cost analysis, projected monthly costs by model |
+| **Budget & Cost** | Budget monitoring with configurable pricing |
+| **Budget Enforcement** | Denials, utilization, remaining budget, decisions by entity |
 
 → [`06-observability/`](./06-observability/)
 
