@@ -39,7 +39,7 @@ All webhook calls are traced to Opik under the project `agentgateway-guardrails`
 
 ## Webhook API Contract
 
-The webhook server implements the **Solo.io Guardrail Webhook API** (`config/guardrail-webhook/server/webhook_api.py`).
+The webhook server implements the **Solo.io Guardrail Webhook API** (`config/services/guardrail-webhook/server/webhook_api.py`).
 
 ### `POST /request` — pre-hook
 
@@ -140,7 +140,7 @@ config/
 ### 1. Build the webhook image
 
 ```bash
-cd config/guardrail-webhook
+cd config/services/guardrail-webhook
 make build
 # Produces multi-arch image: opik-guardrail-webhook:latest (linux/amd64 + linux/arm64)
 ```
@@ -236,7 +236,7 @@ curl http://<GATEWAY_IP>:8080/openai \
 ### Tail webhook logs
 
 ```bash
-cd config/guardrail-webhook
+cd config/services/guardrail-webhook
 make logs
 ```
 
@@ -282,7 +282,7 @@ spec:
 ## Undeploy
 
 ```bash
-cd config/guardrail-webhook
+cd config/services/guardrail-webhook
 make undeploy
 kubectl delete -f config/guardrail-webhook-opik.yaml
 ```

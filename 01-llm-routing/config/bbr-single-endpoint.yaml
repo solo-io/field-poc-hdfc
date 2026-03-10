@@ -1,0 +1,297 @@
+# --- Default Gateway (referenced by HTTPRoutes below) ---
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+
+# --- Feature: providers ---
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vertex-ai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set GOOGLE_APPLICATION_CREDENTIALS>
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: vertex-ai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: vertex-ai
+spec:
+  ai:
+    provider:
+      vertexai:
+        model: google/gemini-2.5-flash
+        projectId: customer-success-386314
+        region: us-central1
+  policies:
+    auth:
+      secretRef:
+        name: vertex-ai-secret
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: local-ollama-chat
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: local-ollama-chat
+spec:
+  ai:
+    provider:
+      openai:
+        model: llama3
+      host: 192.168.162.8
+      port: 11434
+      path: /v1/chat/completions
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: openai-embeddings
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai-embeddings
+spec:
+  ai:
+    provider:
+      openai:
+        model: text-embedding-3-small
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+    ai:
+      routes:
+        /v1/embeddings: Passthrough
+        "*": Passthrough
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: local-ollama-embeddings
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: local-ollama-embeddings
+spec:
+  ai:
+    provider:
+      openai:
+        model: bge-m3
+      host: 192.168.162.8
+      port: 11434
+      path: /api/embed
+  policies:
+    ai:
+      routes:
+        /api/embed: Passthrough
+        "*": Passthrough
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: providers-fallback-common
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: provider-name
+    agentgateway.dev/feature: providers
+    agentgateway.dev/mode: body-routing-fallback
+spec:
+  ai:
+    groups:
+      - providers:
+          - name: vertex-ai
+            vertexai:
+              model: google/gemini-2.5-flash
+              projectId: customer-success-386314
+              region: us-central1
+            policies:
+              auth:
+                secretRef:
+                  name: vertex-ai-secret
+      - providers:
+          - name: local-ollama-chat
+            openai:
+              model: llama3
+            host: 192.168.162.8
+            port: 11434
+            path: /v1/chat/completions
+      - providers:
+          - name: openai-embeddings
+            openai:
+              model: text-embedding-3-large
+            policies:
+              auth:
+                secretRef:
+                  name: openai-secret
+              ai:
+                routes:
+                  /v1/embeddings: Passthrough
+                  "*": Passthrough
+      - providers:
+          - name: local-ollama-embeddings
+            openai:
+              model: all-minilm
+            host: 192.168.162.8
+            port: 11434
+            path: /api/embed
+            policies:
+              ai:
+                routes:
+                  /api/embed: Passthrough
+                  "*": Passthrough
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: providers-common-route
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: provider-name
+    agentgateway.dev/feature: providers
+    agentgateway.dev/mode: body-routing
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            value: /common
+          headers:
+            - name: X-Gateway-Model-Name
+              value: google/gemini-2.5-flash
+      backendRefs:
+        - name: vertex-ai
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+    - matches:
+        - path:
+            value: /common
+          headers:
+            - name: X-Gateway-Model-Name
+              value: llama3
+      backendRefs:
+        - name: local-ollama-chat
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+    - matches:
+        - path:
+            value: /common
+          headers:
+            - name: X-Gateway-Model-Name
+              value: text-embedding-3-small
+      backendRefs:
+        - name: openai-embeddings
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /v1/embeddings
+    - matches:
+        - path:
+            value: /common
+          headers:
+            - name: X-Gateway-Model-Name
+              value: bge-m3
+      backendRefs:
+        - name: local-ollama-embeddings
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+    - matches:
+        - path:
+            value: /common
+          headers:
+            - name: X-Gateway-Model-Status
+              value: unspecified
+      backendRefs:
+        - name: providers-fallback-common
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+
+
+# --- Merged EnterpriseAgentgatewayPolicy Resources ---
+# The following policies were merged from multiple features:
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: providers-agentgateway
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: providers
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway
+  traffic:
+    phase: PreRouting
+    transformation:
+      request:
+        set:
+          - name: X-Gateway-Model-Name
+            value: json(request.body).model
+          - name: X-Gateway-Model-Status
+            value: 'default(json(request.body).model, "") != "" ? "specified" : "unspecified"'
