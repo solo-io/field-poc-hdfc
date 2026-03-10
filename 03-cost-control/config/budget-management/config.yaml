@@ -1,0 +1,231 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: budget-management.agentgateway-system.svc.cluster.local
+      tls:
+        mode: Terminate
+        certificateRefs:
+          # Generate a certificate to terminate HTTPS traffic using budget-management-tls-secret
+          - name: budget-management-tls-secret
+            kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-4o-mini
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            value: /openai
+      backendRefs:
+        - name: openai
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: budget-management-ui
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: budget-management
+spec:
+  parentRefs:
+    - name: agentgateway
+      group: gateway.networking.k8s.io
+      kind: Gateway
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: budget-management
+          port: 8080
+      filters:
+        - type: CORS
+          cors:
+            allowCredentials: true
+            allowHeaders:
+              - Origin
+              - Authorization
+              - Content-Type
+              - Accept
+            allowMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+            allowOrigins:
+              - "*"
+            exposeHeaders:
+              - Content-Type
+              - X-Budget-Cost-USD
+              - X-Budget-Remaining-USD
+            maxAge: 86400
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /callback
+      backendRefs:
+        - name: budget-management
+          port: 8080
+  hostnames:
+    - budget-management.agentgateway-system.svc.cluster.local
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: budget-management-oauth
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: budget-management
+type: extauth.solo.io/oauth
+stringData:
+  client-secret: budget-management-secret
+---
+apiVersion: extauth.solo.io/v1
+kind: AuthConfig
+metadata:
+  name: budget-management-auth
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: budget-management
+spec:
+  configs:
+    - oauth2:
+        oidcAuthorizationCode:
+          appUrl: https://budget-management.agentgateway-system.svc.cluster.local
+          callbackPath: /callback
+          logoutPath: /logout
+          clientId: budget-management
+          clientSecretRef:
+            name: budget-management-oauth
+            namespace: agentgateway-system
+          issuerUrl: https://keycloak.keycloak.svc.cluster.local/realms/agw-dev/
+          scopes:
+            - openid
+            - email
+            - profile
+          session:
+            failOnFetchFailure: true
+            redis:
+              cookieName: budget-session
+              options:
+                host: ext-cache-enterprise-agentgateway-custom:6379
+          headers:
+            idTokenHeader: jwt
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: budget-management-agentgateway
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: budget-management
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: budget-management
+spec:
+  targetRefs:
+    - name: agentgateway
+      group: gateway.networking.k8s.io
+      kind: Gateway
+  traffic:
+    extProc:
+      backendRef:
+        group: ""
+        kind: Service
+        name: budget-management
+        namespace: agentgateway-system
+        port: 4444
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: budget-management-budget-management-ui
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: budget-management
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: budget-management
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: budget-management-ui
+  traffic:
+    entExtAuth:
+      authConfigRef:
+        name: budget-management-auth
+        namespace: agentgateway-system
+      backendRef:
+        name: ext-auth-service-enterprise-agentgateway-custom
+        namespace: agentgateway-system
+        port: 8083

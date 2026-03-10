@@ -8,10 +8,10 @@ This is a proof-of-concept for a customer POC. It is not intended to be a produc
 |---|----------|----------------|--------|-----------|
 | 1 | [LLM Body-Based Routing](#1-llm-body-based-routing) | Body-based routing, multi-provider dispatch | ✅ Ready | [`01-llm-routing/`](./01-llm-routing/) |
 | 2 | [Prompt Guarding](#2-prompt-guarding) | Webhook guard + Opik evaluation & tracing | ✅ Ready | [`02-prompt-guard/`](./02-prompt-guard/) |
-| 3 | [Cost Control & Rate Limits](#3-cost-control--rate-limits) | Token-based local rate limits | 🔜 Planned | [`03-cost-control/`](./03-cost-control/) |
+| 3 | [Cost Control & Rate Limits](#3-cost-control--rate-limits) | Cost control, budget management, ext-proc enforcement | ✅ Ready | [`03-cost-control/`](./03-cost-control/) |
 | 4 | [Authentication & RBAC](#4-authentication--rbac) | OIDC/Keycloak, JWT auth, workload identity, CEL RBAC | ✅ Ready | [`04-auth/`](./04-auth/) |
 | 5 | [Microsoft Entra ID](#5-microsoft-entra-id) | Azure AD / Entra ID integration | 🔜 Planned | [`05-entra-id/`](./05-entra-id/) |
-| 6 | [Observability](#6-observability) | OpenTelemetry, Prometheus, access logging | 🔜 Planned | [`06-observability/`](./06-observability/) |
+| 6 | [Observability](#6-observability) | Grafana dashboards, cost estimation, budget monitoring | ✅ Ready | [`06-observability/`](./06-observability/) |
 
 ---
 
@@ -33,6 +33,7 @@ Route requests to different LLM backends based on the `model` field in the reque
 
 - **`bbr.yaml`** — Chat completions: Vertex AI (Gemini 2.5 Flash) vs local Ollama (Llama 3) on `/chat`
 - **`bbr-embeddings.yaml`** — Embeddings: OpenAI (`text-embedding-3-small`) vs local Ollama (`bge-m3`) on `/embeddings`
+- **`bbr-single-endpoint.yaml`** — Single-endpoint routing: chat and embeddings backends (Vertex AI, Ollama, OpenAI) unified under a single `/common` endpoint with body-based model dispatch
 
 → [`01-llm-routing/`](./01-llm-routing/)
 
