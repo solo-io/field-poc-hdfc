@@ -141,6 +141,18 @@ curl http://localhost:9090/metrics
 
 ## Deployment
 
+The images have been published to the following repository. 
+
+```bash
+australia-southeast1-docker.pkg.dev/field-engineering-apac/public-repo/budget-management-ui@sha256:7a3935ee848b06e84d3c67cd54a280c08ac55a8adaec18e7d7d1e45a12c534be
+```
+
+and
+
+```bash
+australia-southeast1-docker.pkg.dev/field-engineering-apac/public-repo/budget-management-extproc@sha256:6f67b783d69577005d3f06d83e7a1233488fbbf1bfcb0bc1ea4ec547d9d07c84
+```
+
 ```bash
 # 1. Set OpenAI API key in config.yaml
 # Replace: <set OPENAI_API_KEY> with your actual key
