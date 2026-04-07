@@ -294,6 +294,18 @@ curl http://localhost:9090/metrics
 
 ## Deployment
 
+The images have been published to the following repository. 
+
+```bash
+australia-southeast1-docker.pkg.dev/field-engineering-apac/public-repo/budget-management-ui@sha256:7a3935ee848b06e84d3c67cd54a280c08ac55a8adaec18e7d7d1e45a12c534be
+```
+
+and
+
+```bash
+australia-southeast1-docker.pkg.dev/field-engineering-apac/public-repo/budget-management-extproc@sha256:6f67b783d69577005d3f06d83e7a1233488fbbf1bfcb0bc1ea4ec547d9d07c84
+```
+
 ```bash
 # 1. Set OpenAI API key in config.yaml
 # Replace: <set OPENAI_API_KEY> with your actual key
@@ -393,38 +405,3 @@ traffic:
     authConfigRef:
       name: budget-management-auth
 ```
-
-## Tech Stack
-
-**Backend (Go)**
-- [pgx](https://github.com/jackc/pgx) - PostgreSQL driver
-- [zerolog](https://github.com/rs/zerolog) - Structured logging
-- [cel-go](https://github.com/google/cel-go) - CEL expression evaluation
-- [Prometheus client](https://github.com/prometheus/client_golang) - Metrics
-
-**Frontend (TypeScript)**
-- React 19
-- React Router v7
-- SWR - data fetching with cache
-- Emotion - CSS-in-JS styling
-- Vite + Bun
-
-**Infrastructure**
-- PostgreSQL 16 - state store
-- Envoy External Processor API (gRPC) - gateway integration
-- Prometheus - metrics collection
-- Kubernetes - deployment target
-
-## Pre-Seeded Model Costs
-
-The database migration seeds the following models at first startup:
-
-| Provider | Models |
-|----------|--------|
-| OpenAI | gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini, gpt-3.5-turbo, o1, o1-mini, o3, o3-mini |
-| Anthropic | claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus, claude-3-haiku |
-| Google | gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-pro, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash |
-| Mistral | mistral-large, mistral-medium, mistral-small, mistral-7b |
-| AWS | nova-micro, nova-lite, nova-pro |
-
-Pricing is stored per 1,000,000 tokens. Costs can be updated via the UI or API without requiring a service restart (cache TTL 60s).
