@@ -128,6 +128,15 @@ var (
 		[]string{"period"},
 	)
 
+	// Quota status metrics (budget + rate limit approval tracking)
+	QuotaStatusTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "quota_status_total",
+			Help: "Total count of quota items by org, type, and status",
+		},
+		[]string{"org", "type", "status"},
+	)
+
 	// ext-proc metrics
 	ExtProcRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -201,6 +210,11 @@ func RecordBudgetFallback(childEntityType, childName, parentEntityType, parentNa
 func RecordExtProc(phase, status string, duration time.Duration) {
 	ExtProcRequestsTotal.WithLabelValues(phase, status).Inc()
 	ExtProcDuration.WithLabelValues(phase).Observe(duration.Seconds())
+}
+
+// RecordQuotaStatus records a quota status change (budget or rate limit).
+func RecordQuotaStatus(org, quotaType, status string) {
+	QuotaStatusTotal.WithLabelValues(org, quotaType, status).Inc()
 }
 
 // DeleteBudgetMetrics removes all gauge metrics for a deleted budget

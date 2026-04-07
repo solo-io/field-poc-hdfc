@@ -2,6 +2,8 @@
 
 Route incoming requests to different LLM backends based on the **`model` field in the JSON request body**. An `EnterpriseAgentgatewayPolicy` extracts the model name into a request header at the PreRouting phase; standard Gateway API `HTTPRoute` rules then match on that header to dispatch to the correct backend.
 
+**Scenarios A–C** follow that pattern. **Scenarios D–E** use [`config/routing-stt.yaml`](./config/routing-stt.yaml) and [`config/routing-tts.yaml`](./config/routing-tts.yaml): OpenAI Audio APIs behind a single gateway prefix with `Passthrough` routes and a `URLRewrite` (no body-to-header policy).
+
 > This setup targets **Enterprise Agentgateway on Kubernetes** using the Gateway API (`gateway.networking.k8s.io`).
 
 ## Architecture
@@ -271,19 +273,91 @@ curl http://<GATEWAY_IP>:8080/common \
 
 ---
 
+## Scenario D — OpenAI Speech-to-Text (STT)
+
+**Config:** [`config/routing-stt.yaml`](./config/routing-stt.yaml)
+
+Proxies OpenAI **speech-to-text** (`/v1/audio/transcriptions`) through the gateway. Clients use the **`/openai`** prefix; an `HTTPRoute` filter rewrites that prefix to `/` so the upstream path matches OpenAI’s API. Backend default model is **`whisper-1`**; the transcription request still follows [OpenAI’s multipart API](https://platform.openai.com/docs/api-reference/audio/createTranscription).
+
+### Resources
+
+| Resource | Kind | Purpose |
+|----------|------|---------|
+| `agentgateway` | `Gateway` | Entry point on port `8080` |
+| `openai-secret` | `Secret` | OpenAI API key (`Authorization`) |
+| `openai` | `AgentgatewayBackend` | OpenAI provider; `ai.routes` — `/v1/audio/transcriptions` → `Passthrough` |
+| `openai` | `HTTPRoute` | Match path `/openai` → backend `openai`; `URLRewrite` `ReplacePrefixMatch` → `/` |
+
+### Apply
+
+```bash
+kubectl apply -f config/routing-stt.yaml
+```
+
+### Test
+
+```bash
+curl http://<GATEWAY_IP>:8080/openai/v1/audio/transcriptions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -F file="@/path/to/audio.mp3" \
+  -F model="whisper-1"
+```
+
+---
+
+## Scenario E — OpenAI Text-to-Speech (TTS)
+
+**Config:** [`config/routing-tts.yaml`](./config/routing-tts.yaml)
+
+Proxies OpenAI **text-to-speech** (`/v1/audio/speech`) through the gateway with the same **`/openai`** prefix and prefix rewrite as Scenario D. Backend provider model in the manifest is **`gpt-4o-mini`**; for `Passthrough`, the JSON body’s `model` must be one [OpenAI supports for speech](https://platform.openai.com/docs/api-reference/audio/createSpeech) (for example `tts-1` or `gpt-4o-mini-tts`).
+
+**Note:** `routing-stt.yaml` and `routing-tts.yaml` each declare an `HTTPRoute` and `AgentgatewayBackend` named `openai`. Do not apply both to the same namespace without merging them (e.g. one backend with both `/v1/audio/transcriptions` and `/v1/audio/speech` as `Passthrough`), or the latter apply will overwrite the former.
+
+### Resources
+
+| Resource | Kind | Purpose |
+|----------|------|---------|
+| `agentgateway` | `Gateway` | Entry point on port `8080` |
+| `openai-secret` | `Secret` | OpenAI API key (`Authorization`) |
+| `openai` | `AgentgatewayBackend` | OpenAI provider; `ai.routes` — `/v1/audio/speech` → `Passthrough` |
+| `openai` | `HTTPRoute` | Match path `/openai` → backend `openai`; `URLRewrite` `ReplacePrefixMatch` → `/` |
+
+### Apply
+
+```bash
+kubectl apply -f config/routing-tts.yaml
+```
+
+### Test
+
+```bash
+curl http://<GATEWAY_IP>:8080/openai/v1/audio/speech \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "tts-1",
+    "input": "Hello from the gateway.",
+    "voice": "alloy"
+  }' \
+  --output speech.mp3
+```
+
+---
+
 ## Key Takeaways
 
 - `EnterpriseAgentgatewayPolicy` with `phase: PreRouting` is the mechanism for body-based routing — it lifts the `model` field out of the JSON body into a header so standard Gateway API header matching can do the dispatching.
 - `X-Gateway-Model-Status: unspecified` provides a zero-config fallback: requests that omit the `model` field are automatically caught and sent to a group backend.
 - Embedding backends use `Passthrough` for all routes and a `URLRewrite` filter to remove the path prefix before forwarding to the provider.
 - `ai.groups` in the fallback backend enables provider-level redundancy (priority ordering) with no extra infrastructure.
+- OpenAI STT/TTS configs (`routing-stt.yaml`, `routing-tts.yaml`) use **only** `HTTPRoute` + `AgentgatewayBackend`: `Passthrough` on the audio path and a prefix strip from `/openai` to `/` — no `EnterpriseAgentgatewayPolicy`.
 
 ## Prerequisites
 
 - Kubernetes cluster with Enterprise Agentgateway installed (`enterprise-agentgateway` GatewayClass)
 - Secrets populated before applying:
   - `vertex-ai-secret`: set `Authorization` to your Google Application credentials (`bbr.yaml`)
-  - `openai-secret`: set `Authorization` to your OpenAI API key (`bbr-embeddings.yaml`)
+  - `openai-secret`: set `Authorization` to your OpenAI API key (`bbr-embeddings.yaml`, `routing-stt.yaml`, `routing-tts.yaml`)
 - For Ollama routes: Ollama running locally and accessible from the cluster
   - Scenarios A/B use `host.minikube.internal:11434`
   - Scenario C uses a direct IP (`192.168.162.8:11434`) — update the YAML to match your environment

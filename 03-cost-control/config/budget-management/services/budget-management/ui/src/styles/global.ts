@@ -1,8 +1,23 @@
 import { css } from '@emotion/react';
-import { colors } from './colors';
+import { colors, darkTheme, lightTheme } from './colors';
 import { fontFamily } from './typography';
 
+// Generate CSS variable declarations from theme object
+const themeToCSS = (theme: Record<string, string>) =>
+  Object.entries(theme)
+    .map(([key, value]) => `${key}: ${value};`)
+    .join('\n    ');
+
 export const globalStyles = css`
+  :root,
+  [data-theme='dark'] {
+    ${themeToCSS(darkTheme)}
+  }
+
+  [data-theme='light'] {
+    ${themeToCSS(lightTheme)}
+  }
+
   *,
   *::before,
   *::after {
@@ -23,6 +38,9 @@ export const globalStyles = css`
     color: ${colors.foreground};
     line-height: 1.5;
     min-height: 100vh;
+    transition:
+      background-color 0.2s ease,
+      color 0.2s ease;
   }
 
   #root {

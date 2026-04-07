@@ -10,13 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agentgateway/budget-management/internal/api"
-	"github.com/agentgateway/budget-management/internal/budget"
-	"github.com/agentgateway/budget-management/internal/cel"
-	"github.com/agentgateway/budget-management/internal/config"
-	"github.com/agentgateway/budget-management/internal/db"
-	"github.com/agentgateway/budget-management/internal/extproc"
-	"github.com/agentgateway/budget-management/internal/metrics"
+	"github.com/agentgateway/quota-management/internal/api"
+	"github.com/agentgateway/quota-management/internal/audit"
+	"github.com/agentgateway/quota-management/internal/budget"
+	"github.com/agentgateway/quota-management/internal/cel"
+	"github.com/agentgateway/quota-management/internal/config"
+	"github.com/agentgateway/quota-management/internal/db"
+	"github.com/agentgateway/quota-management/internal/extproc"
+	"github.com/agentgateway/quota-management/internal/metrics"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -47,7 +48,14 @@ func main() {
 	defer cancel()
 
 	// Connect to database
-	database, err := db.New(ctx, cfg.DatabaseURL)
+	database, err := db.New(ctx, db.Config{
+		DatabaseURL:    cfg.DatabaseURL,
+		MaxConnections: cfg.DBMaxConnections,
+		SSLMode:        cfg.DBSSLMode,
+		SSLCACert:      cfg.DBSSLCACert,
+		SSLClientCert:  cfg.DBSSLClientCert,
+		SSLClientKey:   cfg.DBSSLClientKey,
+	})
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -77,12 +85,12 @@ func main() {
 		log.Warn().Err(err).Msg("failed to initialize budget metrics")
 	}
 
-	// Create ext_proc server
-	extprocServer := extproc.NewServer(budgetSvc, celEvaluator, cfg)
+	// Create ext_proc server for budget enforcement
+	budgetExtprocServer := extproc.NewBudgetServer(budgetSvc, celEvaluator, cfg)
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
-	extprocServer.Register(grpcServer)
+	budgetExtprocServer.Register(grpcServer)
 
 	// Register health service
 	healthServer := health.NewServer()
@@ -94,7 +102,8 @@ func main() {
 
 	// Create HTTP server for management API and UI
 	router := mux.NewRouter()
-	apiHandler := api.NewHandler(repo, celEvaluator)
+	auditSvc := audit.NewService(repo)
+	apiHandler := api.NewHandler(repo, celEvaluator, auditSvc)
 	apiHandler.RegisterRoutes(router)
 
 	// Serve static UI files

@@ -9,6 +9,7 @@ interface Permissions {
   canCreateOrgBudgets: boolean;
   canDeleteBudgets: boolean;
   canManageModelCosts: boolean;
+  canToggleBudgetEnabled: boolean;
   canEditBudget: (budget: BudgetDefinition) => boolean;
   canViewBudget: (budget: BudgetDefinition) => boolean;
 }
@@ -27,6 +28,7 @@ const defaultPermissions: Permissions = {
   canCreateOrgBudgets: false,
   canDeleteBudgets: false,
   canManageModelCosts: false,
+  canToggleBudgetEnabled: false,
   canEditBudget: () => false,
   canViewBudget: () => false,
 };
@@ -52,16 +54,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetchIdentity();
   }, []);
 
-  // Refresh identity when window regains focus
-  useEffect(() => {
-    const handleFocus = () => {
-      fetchIdentity();
-    };
-
-    window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
-  }, []);
-
   const refresh = async () => {
     setLoading(true);
     await fetchIdentity();
@@ -85,8 +77,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       canDeleteBudgets: isOrgAdmin,
       // Only org admins can manage model costs
       canManageModelCosts: isOrgAdmin,
+      // Only org admins can enable/disable budgets
+      canToggleBudgetEnabled: isOrgAdmin,
       // Org admins can edit any budget in their org; team members only their team's
       // Budgets with no owner can be edited by org admins only
+      // Team members cannot edit disabled budgets (org admin disabled it)
       canEditBudget: (budget: BudgetDefinition) => {
         // No owner = only org admins can edit
         if (!budget.owner_org_id && !budget.owner_team_id) {
@@ -96,11 +91,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return budget.owner_org_id === identity.org_id;
         }
         if (isTeamMember) {
+          // Team members cannot edit disabled budgets
+          if (!budget.enabled) {
+            return false;
+          }
           return budget.owner_team_id === identity.team_id;
         }
         return false;
       },
-      // Org admins can view all budgets in their org; team members only their team's
+      // Org admins can view all budgets in their org
+      // Team members can view their team's budgets AND their org's budgets (for parent selection in forms)
       // Budgets with no owner are visible to everyone (backwards compatibility)
       canViewBudget: (budget: BudgetDefinition) => {
         // No owner = visible to all
@@ -111,7 +111,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return budget.owner_org_id === identity.org_id;
         }
         if (isTeamMember) {
-          return budget.owner_team_id === identity.team_id;
+          // Team members can see their own team's budgets
+          if (budget.owner_team_id === identity.team_id) {
+            return true;
+          }
+          // Team members can also see org-level budgets from their org (for parent selection)
+          if (budget.owner_org_id === identity.org_id && !budget.owner_team_id) {
+            return true;
+          }
         }
         return false;
       },

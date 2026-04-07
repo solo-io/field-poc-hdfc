@@ -1,18 +1,20 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/agentgateway/budget-management/internal/auth"
-	"github.com/agentgateway/budget-management/internal/cel"
-	"github.com/agentgateway/budget-management/internal/db"
-	"github.com/agentgateway/budget-management/internal/metrics"
-	"github.com/agentgateway/budget-management/internal/models"
+	"github.com/agentgateway/quota-management/internal/audit"
+	"github.com/agentgateway/quota-management/internal/auth"
+	"github.com/agentgateway/quota-management/internal/cel"
+	"github.com/agentgateway/quota-management/internal/db"
+	"github.com/agentgateway/quota-management/internal/metrics"
+	"github.com/agentgateway/quota-management/internal/models"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
@@ -20,13 +22,22 @@ import (
 
 // Handler provides HTTP handlers for the management API.
 type Handler struct {
-	repo         *db.Repository
-	celEvaluator *cel.Evaluator
+	repo            *db.Repository
+	celEvaluator    *cel.Evaluator
+	auditSvc        *audit.Service
+	approvalHandler *ApprovalHandler
+	auditHandler    *AuditHandler
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(repo *db.Repository, celEvaluator *cel.Evaluator) *Handler {
-	return &Handler{repo: repo, celEvaluator: celEvaluator}
+func NewHandler(repo *db.Repository, celEvaluator *cel.Evaluator, auditSvc *audit.Service) *Handler {
+	return &Handler{
+		repo:            repo,
+		celEvaluator:    celEvaluator,
+		auditSvc:        auditSvc,
+		approvalHandler: NewApprovalHandler(repo, auditSvc),
+		auditHandler:    NewAuditHandler(repo),
+	}
 }
 
 // RegisterRoutes registers all API routes.
@@ -34,24 +45,38 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 	// Identity endpoint (uses optional auth to return identity if JWT present)
 	r.Handle("/api/v1/identity", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetIdentity))).Methods("GET")
 
-	// Model costs
-	r.HandleFunc("/api/v1/model-costs", h.ListModelCosts).Methods("GET")
-	r.HandleFunc("/api/v1/model-costs", h.CreateModelCost).Methods("POST")
-	r.HandleFunc("/api/v1/model-costs/{model_id}", h.GetModelCost).Methods("GET")
-	r.HandleFunc("/api/v1/model-costs/{model_id}", h.UpdateModelCost).Methods("PUT")
-	r.HandleFunc("/api/v1/model-costs/{model_id}", h.DeleteModelCost).Methods("DELETE")
+	// Model costs (require org admin auth for mutations, authenticated for reads)
+	r.Handle("/api/v1/model-costs", auth.OptionalAuthMiddleware(http.HandlerFunc(h.ListModelCosts))).Methods("GET")
+	r.Handle("/api/v1/model-costs", auth.OptionalAuthMiddleware(http.HandlerFunc(h.CreateModelCost))).Methods("POST")
+	r.Handle("/api/v1/model-costs/providers", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetModelCostProviders))).Methods("GET")
+	r.Handle("/api/v1/model-costs/{model_id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetModelCost))).Methods("GET")
+	r.Handle("/api/v1/model-costs/{model_id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.UpdateModelCost))).Methods("PUT")
+	r.Handle("/api/v1/model-costs/{model_id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.DeleteModelCost))).Methods("DELETE")
 
 	// Budgets (use optional auth to filter by identity when authenticated)
 	r.Handle("/api/v1/budgets", auth.OptionalAuthMiddleware(http.HandlerFunc(h.ListBudgets))).Methods("GET")
+	r.Handle("/api/v1/budgets/parent-candidates", auth.OptionalAuthMiddleware(http.HandlerFunc(h.ListParentCandidates))).Methods("GET")
 	r.Handle("/api/v1/budgets", auth.OptionalAuthMiddleware(http.HandlerFunc(h.CreateBudget))).Methods("POST")
 	r.Handle("/api/v1/budgets/{id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetBudget))).Methods("GET")
 	r.Handle("/api/v1/budgets/{id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.UpdateBudget))).Methods("PUT")
 	r.Handle("/api/v1/budgets/{id}", auth.OptionalAuthMiddleware(http.HandlerFunc(h.DeleteBudget))).Methods("DELETE")
 	r.Handle("/api/v1/budgets/{id}/usage", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetBudgetUsage))).Methods("GET")
 	r.Handle("/api/v1/budgets/{id}/reset", auth.OptionalAuthMiddleware(http.HandlerFunc(h.ResetBudget))).Methods("POST")
+	r.Handle("/api/v1/budgets/{id}/children", auth.OptionalAuthMiddleware(http.HandlerFunc(h.GetBudgetChildren))).Methods("GET")
 
 	// CEL validation
 	r.HandleFunc("/api/v1/validate-cel", h.ValidateCEL).Methods("POST")
+
+	// Approvals (require auth)
+	r.Handle("/api/v1/approvals", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.ListPendingApprovals))).Methods("GET")
+	r.Handle("/api/v1/approvals/count", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.CountPendingApprovals))).Methods("GET")
+	r.Handle("/api/v1/approvals/history", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.ListApprovalHistory))).Methods("GET")
+	r.Handle("/api/v1/approvals/{budget_id}/approve", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.ApproveBudget))).Methods("POST")
+	r.Handle("/api/v1/approvals/{budget_id}/reject", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.RejectBudget))).Methods("POST")
+	r.Handle("/api/v1/approvals/{budget_id}/resubmit", auth.OptionalAuthMiddleware(http.HandlerFunc(h.approvalHandler.ResubmitBudget))).Methods("POST")
+
+	// Audit
+	r.Handle("/api/v1/audit", auth.OptionalAuthMiddleware(http.HandlerFunc(h.auditHandler.ListAuditLogs))).Methods("GET")
 
 	// Health check
 	r.HandleFunc("/health", h.Health).Methods("GET")
@@ -76,18 +101,62 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
+// requireOrgAdmin checks if the request is from an authenticated org admin.
+// Returns the identity if valid, nil otherwise (and writes error response).
+func requireOrgAdmin(w http.ResponseWriter, r *http.Request) *auth.Identity {
+	identity := auth.GetIdentity(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return nil
+	}
+	if !identity.IsOrg {
+		writeError(w, http.StatusForbidden, "org admin access required")
+		return nil
+	}
+	return identity
+}
+
+// requireAuthenticated checks if the request is from an authenticated user.
+// Returns the identity if valid, nil otherwise (and writes error response).
+func requireAuthenticated(w http.ResponseWriter, r *http.Request) *auth.Identity {
+	identity := auth.GetIdentity(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return nil
+	}
+	return identity
+}
+
+// canEnableBudget checks if the identity can enable a disabled budget
+func canEnableBudget(budget *models.BudgetDefinition, identity *auth.Identity) bool {
+	if budget.Enabled {
+		return true // Already enabled - no-op, allow
+	}
+	// If disabled by org-admin, only org-admin can re-enable
+	if budget.DisabledByIsOrg && !identity.IsOrg {
+		return false
+	}
+	return true
+}
+
 // modelCostToMap converts a ModelCost to a map with proper JSON serialization
 // for sql.Null* types (which otherwise serialize as {"String":"...", "Valid": true}).
 func modelCostToMap(c *models.ModelCost) map[string]interface{} {
 	result := map[string]interface{}{
-		"id":                     c.ID,
-		"model_id":               c.ModelID,
-		"provider":               c.Provider,
+		"id":                      c.ID,
+		"model_id":                c.ModelID,
+		"provider":                c.Provider,
 		"input_cost_per_million":  c.InputCostPerMillion,
 		"output_cost_per_million": c.OutputCostPerMillion,
-		"effective_date":         c.EffectiveDate,
-		"created_at":             c.CreatedAt,
-		"updated_at":             c.UpdatedAt,
+		"effective_date":          c.EffectiveDate,
+		"created_at":              c.CreatedAt,
+		"updated_at":              c.UpdatedAt,
+	}
+	if c.CreatedByUserID.Valid {
+		result["created_by_user_id"] = c.CreatedByUserID.String
+	}
+	if c.CreatedByEmail.Valid {
+		result["created_by_email"] = c.CreatedByEmail.String
 	}
 
 	// Handle nullable fields - only include if valid
@@ -124,6 +193,14 @@ func budgetToMap(b *models.BudgetDefinition) map[string]interface{} {
 		"remaining_usd":         b.CalculateRemaining(),
 		"created_at":            b.CreatedAt,
 		"updated_at":            b.UpdatedAt,
+		"approval_status":       string(b.ApprovalStatus),
+		"rejection_count":       b.RejectionCount,
+	}
+	if b.CreatedByUserID.Valid {
+		result["created_by_user_id"] = b.CreatedByUserID.String
+	}
+	if b.CreatedByEmail.Valid {
+		result["created_by_email"] = b.CreatedByEmail.String
 	}
 
 	if b.Description.Valid {
@@ -132,34 +209,78 @@ func budgetToMap(b *models.BudgetDefinition) map[string]interface{} {
 	if b.CustomPeriodSeconds.Valid {
 		result["custom_period_seconds"] = b.CustomPeriodSeconds.Int32
 	}
+	if b.OwnerOrgID.Valid {
+		result["owner_org_id"] = b.OwnerOrgID.String
+	}
+	if b.OwnerTeamID.Valid {
+		result["owner_team_id"] = b.OwnerTeamID.String
+	}
 
 	return result
 }
 
 // Model Cost handlers
 
-// ListModelCosts lists all model costs.
+// ListModelCosts lists model costs with pagination.
+// Requires authentication.
 func (h *Handler) ListModelCosts(w http.ResponseWriter, r *http.Request) {
-	costs, err := h.repo.ListModelCosts(r.Context())
+	if requireAuthenticated(w, r) == nil {
+		return
+	}
+
+	params := parsePagination(r)
+
+	sortBy := r.URL.Query().Get("sort_by")
+	if sortBy != "input_cost" && sortBy != "output_cost" && sortBy != "both" {
+		sortBy = ""
+	}
+	sortDir := r.URL.Query().Get("sort_dir")
+	if sortDir != "asc" && sortDir != "desc" {
+		sortDir = "asc"
+	}
+
+	filter := db.ModelCostFilter{
+		Provider: r.URL.Query().Get("provider"),
+		SortBy:   sortBy,
+		SortDir:  sortDir,
+	}
+
+	costs, totalCount, err := h.repo.ListModelCostsPaginated(r.Context(), filter, params.Offset(), params.PageSize)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list model costs")
 		writeError(w, http.StatusInternalServerError, "failed to list model costs")
 		return
 	}
 
-	// Convert sql.Null* types to proper JSON values
 	result := make([]map[string]interface{}, len(costs))
 	for i, c := range costs {
 		result[i] = modelCostToMap(&c)
 	}
 
+	writePaginatedJSON(w, http.StatusOK, result, params, totalCount)
+}
+
+// GetModelCostProviders returns all distinct provider names.
+func (h *Handler) GetModelCostProviders(w http.ResponseWriter, r *http.Request) {
+	providers, err := h.repo.ListDistinctProviders(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list providers")
+		writeError(w, http.StatusInternalServerError, "failed to list providers")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"model_costs": result,
+		"providers": providers,
 	})
 }
 
 // GetModelCost gets a model cost by model ID.
+// Requires authentication.
 func (h *Handler) GetModelCost(w http.ResponseWriter, r *http.Request) {
+	if requireAuthenticated(w, r) == nil {
+		return
+	}
+
 	vars := mux.Vars(r)
 	modelID := vars["model_id"]
 
@@ -189,7 +310,13 @@ type CreateModelCostRequest struct {
 }
 
 // CreateModelCost creates a new model cost.
+// Requires org admin authentication.
 func (h *Handler) CreateModelCost(w http.ResponseWriter, r *http.Request) {
+	identity := requireOrgAdmin(w, r)
+	if identity == nil {
+		return
+	}
+
 	var req CreateModelCostRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -212,6 +339,8 @@ func (h *Handler) CreateModelCost(w http.ResponseWriter, r *http.Request) {
 		InputCostPerMillion:  req.InputCostPerMillion,
 		OutputCostPerMillion: req.OutputCostPerMillion,
 		EffectiveDate:        time.Now(),
+		CreatedByUserID:      sql.NullString{String: identity.Subject, Valid: identity.Subject != ""},
+		CreatedByEmail:       sql.NullString{String: identity.Email, Valid: identity.Email != ""},
 	}
 
 	if err := h.repo.CreateModelCost(r.Context(), mc); err != nil {
@@ -220,11 +349,21 @@ func (h *Handler) CreateModelCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditSvc.LogAction(r.Context(), "model_cost", mc.ModelID, "created", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"model_id": mc.ModelID,
+		"provider": mc.Provider,
+	})
+
 	writeJSON(w, http.StatusCreated, mc)
 }
 
 // UpdateModelCost updates a model cost.
+// Requires org admin authentication.
 func (h *Handler) UpdateModelCost(w http.ResponseWriter, r *http.Request) {
+	if requireOrgAdmin(w, r) == nil {
+		return
+	}
+
 	vars := mux.Vars(r)
 	modelID := vars["model_id"]
 
@@ -251,11 +390,21 @@ func (h *Handler) UpdateModelCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditSvc.LogAction(r.Context(), "model_cost", modelID, "updated", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"model_id": modelID,
+		"provider": mc.Provider,
+	})
+
 	writeJSON(w, http.StatusOK, mc)
 }
 
 // DeleteModelCost deletes a model cost.
+// Requires org admin authentication.
 func (h *Handler) DeleteModelCost(w http.ResponseWriter, r *http.Request) {
+	if requireOrgAdmin(w, r) == nil {
+		return
+	}
+
 	vars := mux.Vars(r)
 	modelID := vars["model_id"]
 
@@ -269,93 +418,65 @@ func (h *Handler) DeleteModelCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditSvc.LogAction(r.Context(), "model_cost", modelID, "deleted", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"model_id": modelID,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // Budget handlers
 
-// ListBudgets lists all budgets, filtered by the user's identity if authenticated.
+// ListBudgets lists budgets with pagination and SQL-level RBAC filtering.
+// Query params:
+//   - enabled_only=true: Only return enabled budgets (for "At a Glance" counts)
 func (h *Handler) ListBudgets(w http.ResponseWriter, r *http.Request) {
-	budgets, err := h.repo.ListBudgets(r.Context())
+	params := parsePagination(r)
+
+	var filter db.BudgetListFilter
+	identity := auth.GetIdentity(r.Context())
+	if identity != nil {
+		filter.OrgID = identity.OrgID
+		filter.TeamID = identity.TeamID
+		filter.IsOrg = identity.IsOrg
+	}
+	if r.URL.Query().Get("enabled_only") == "true" {
+		filter.EnabledOnly = true
+	}
+
+	budgets, totalCount, err := h.repo.ListBudgetsPaginated(r.Context(), filter, params.Offset(), params.PageSize)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list budgets")
 		writeError(w, http.StatusInternalServerError, "failed to list budgets")
 		return
 	}
 
-	// Filter budgets by identity if authenticated
-	identity := auth.GetIdentity(r.Context())
-	if identity != nil {
-		var ownership []auth.BudgetOwnership
-		for i, b := range budgets {
-			ownership = append(ownership, auth.BudgetOwnership{
-				Index:       i,
-				OwnerOrgID:  b.OwnerOrgID.String,
-				OwnerTeamID: b.OwnerTeamID.String,
-			})
-			log.Debug().
-				Str("budget_name", b.Name).
-				Str("owner_org_id", b.OwnerOrgID.String).
-				Str("owner_team_id", b.OwnerTeamID.String).
-				Bool("org_valid", b.OwnerOrgID.Valid).
-				Bool("team_valid", b.OwnerTeamID.Valid).
-				Msg("budget ownership info")
-		}
-
-		allowedIndices := auth.FilterBudgetsByIdentity(identity, ownership)
-		filteredBudgets := make([]models.BudgetDefinition, 0, len(allowedIndices))
-		for _, idx := range allowedIndices {
-			filteredBudgets = append(filteredBudgets, budgets[idx])
-		}
-		budgets = filteredBudgets
-
-		log.Debug().
-			Str("identity_org_id", identity.OrgID).
-			Str("identity_team_id", identity.TeamID).
-			Bool("identity_is_org", identity.IsOrg).
-			Int("total_budgets", len(ownership)).
-			Int("filtered_budgets", len(budgets)).
-			Msg("filtered budgets by identity")
-	} else {
-		log.Debug().Msg("no identity in context, returning all budgets")
-	}
-
-	// Add remaining budget calculation
 	result := make([]map[string]interface{}, len(budgets))
 	for i, b := range budgets {
-		item := map[string]interface{}{
-			"id":                    b.ID,
-			"entity_type":           b.EntityType,
-			"name":                  b.Name,
-			"match_expression":      b.MatchExpression,
-			"budget_amount_usd":     b.BudgetAmountUSD,
-			"period":                b.Period,
-			"warning_threshold_pct": b.WarningThresholdPct,
-			"parent_id":             b.ParentID,
-			"isolated":              b.Isolated,
-			"allow_fallback":        b.AllowFallback,
-			"enabled":               b.Enabled,
-			"current_period_start":  b.CurrentPeriodStart,
-			"current_usage_usd":     b.CurrentUsageUSD,
-			"pending_usage_usd":     b.PendingUsageUSD,
-			"remaining_usd":         b.CalculateRemaining(),
-			"description":           b.Description.String,
-			"version":               b.Version,
-			"created_at":            b.CreatedAt,
-			"updated_at":            b.UpdatedAt,
-		}
-		if b.OwnerOrgID.Valid {
-			item["owner_org_id"] = b.OwnerOrgID.String
-		}
-		if b.OwnerTeamID.Valid {
-			item["owner_team_id"] = b.OwnerTeamID.String
-		}
-		result[i] = item
+		result[i] = budgetToMap(&b)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"budgets": result,
-	})
+	writePaginatedJSON(w, http.StatusOK, result, params, totalCount)
+}
+
+// ListParentCandidates returns org-level budgets that can be selected as parent budgets.
+// Returns minimal data (id, name, amount, period) for dropdown selection.
+func (h *Handler) ListParentCandidates(w http.ResponseWriter, r *http.Request) {
+	identity := auth.GetIdentity(r.Context())
+	if identity == nil || identity.OrgID == "" {
+		// Unauthenticated users get empty list
+		writeJSON(w, http.StatusOK, []db.ParentBudgetCandidate{})
+		return
+	}
+
+	candidates, err := h.repo.ListParentCandidates(r.Context(), identity.OrgID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list parent candidates")
+		writeError(w, http.StatusInternalServerError, "failed to list parent candidates")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, candidates)
 }
 
 // GetBudget gets a budget by ID.
@@ -463,8 +584,8 @@ func (h *Handler) CreateBudget(w http.ResponseWriter, r *http.Request) {
 		MatchExpression: req.MatchExpression,
 		BudgetAmountUSD: req.BudgetAmountUSD,
 		Period:          models.BudgetPeriod(req.Period),
-		Isolated:        true, // Default to isolated
-		Enabled:         true, // Default to enabled
+		Isolated:        false, // Default to non-isolated
+		Enabled:         true,  // Default to enabled
 	}
 
 	if req.CustomPeriodSeconds != nil {
@@ -478,7 +599,7 @@ func (h *Handler) CreateBudget(w http.ResponseWriter, r *http.Request) {
 		budget.WarningThresholdPct = 80
 	}
 
-	var warning string
+	var parentBudget *models.BudgetDefinition
 	if req.ParentID != nil {
 		parentID, err := uuid.Parse(*req.ParentID)
 		if err != nil {
@@ -487,20 +608,48 @@ func (h *Handler) CreateBudget(w http.ResponseWriter, r *http.Request) {
 		}
 		budget.ParentID = &parentID
 
-		// Warn if child budget exceeds parent budget
-		parent, err := h.repo.GetBudgetByID(r.Context(), parentID)
-		if err == nil && budget.BudgetAmountUSD > parent.BudgetAmountUSD {
-			warning = fmt.Sprintf("budget $%.4f exceeds parent budget $%.4f", budget.BudgetAmountUSD, parent.BudgetAmountUSD)
-			log.Warn().Str("child", budget.Name).Str("parent", parent.Name).Msg(warning)
+		// Get parent budget for inheritance and validation
+		parentBudget, err = h.repo.GetBudgetByID(r.Context(), parentID)
+		if err == nil {
+			// Team budgets inherit isolated and allow_fallback from parent org
+			budget.Isolated = parentBudget.Isolated
+			budget.AllowFallback = parentBudget.AllowFallback
 		}
 	}
 
+	// Isolated and AllowFallback can only be set by org-admins or for org entity types
+	// Team users cannot set these - they inherit from parent
+	identity := auth.GetIdentity(r.Context())
 	if req.Isolated != nil {
-		budget.Isolated = *req.Isolated
+		if budget.EntityType == models.EntityTypeOrg {
+			// Orgs can always set isolation
+			budget.Isolated = *req.Isolated
+		} else if identity != nil && identity.IsOrg {
+			// Org-admins can set isolation on team budgets
+			budget.Isolated = *req.Isolated
+		}
+		// Team users setting isolated is ignored - they inherit from parent
 	}
 
 	if req.AllowFallback != nil {
-		budget.AllowFallback = *req.AllowFallback
+		if budget.EntityType == models.EntityTypeOrg {
+			// Orgs can always set allow_fallback
+			budget.AllowFallback = *req.AllowFallback
+		} else if identity != nil && identity.IsOrg {
+			// Org-admins can set allow_fallback on team budgets
+			budget.AllowFallback = *req.AllowFallback
+		}
+		// Team users setting allow_fallback is ignored - they inherit from parent
+	}
+
+	// Validate: non-isolated child budget cannot exceed parent budget
+	if parentBudget != nil && !budget.Isolated {
+		if budget.BudgetAmountUSD > parentBudget.BudgetAmountUSD {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"team budget ($%.6f) cannot exceed parent org budget ($%.6f) for non-isolated budgets",
+				budget.BudgetAmountUSD, parentBudget.BudgetAmountUSD))
+			return
+		}
 	}
 
 	if req.Enabled != nil {
@@ -523,17 +672,44 @@ func (h *Handler) CreateBudget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If no ownership specified in request, use identity
-	identity := auth.GetIdentity(r.Context())
 	if identity != nil && !budget.OwnerOrgID.Valid && !budget.OwnerTeamID.Valid {
 		orgID, teamID := auth.GetOwnershipFromIdentity(identity)
-		if orgID != "" {
-			budget.OwnerOrgID.Valid = true
-			budget.OwnerOrgID.String = orgID
-		}
-		if teamID != "" {
+		// For standalone team budgets (no parent), only set team ownership
+		// This ensures they don't appear in org-admin approval lists
+		if budget.ParentID == nil && teamID != "" {
+			// Standalone team budget - only set team, not org
 			budget.OwnerTeamID.Valid = true
 			budget.OwnerTeamID.String = teamID
+		} else {
+			// Child budget or org budget - set both
+			if orgID != "" {
+				budget.OwnerOrgID.Valid = true
+				budget.OwnerOrgID.String = orgID
+			}
+			if teamID != "" {
+				budget.OwnerTeamID.Valid = true
+				budget.OwnerTeamID.String = teamID
+			}
 		}
+	}
+
+	// Set creator info from identity
+	if identity != nil {
+		budget.CreatedByUserID = sql.NullString{String: identity.Subject, Valid: identity.Subject != ""}
+		budget.CreatedByEmail = sql.NullString{String: identity.Email, Valid: identity.Email != ""}
+
+		if identity.IsOrg {
+			// Org users are always auto-approved
+			budget.ApprovalStatus = models.ApprovalStatusApproved
+		} else if budget.ParentID == nil {
+			// Team users creating standalone budgets (no parent) are auto-approved
+			budget.ApprovalStatus = models.ApprovalStatusApproved
+		} else {
+			// Team users creating child budgets need approval
+			budget.ApprovalStatus = models.ApprovalStatusPending
+		}
+	} else {
+		budget.ApprovalStatus = models.ApprovalStatusApproved
 	}
 
 	// Check if budget already exists (upsert behavior)
@@ -554,11 +730,24 @@ func (h *Handler) CreateBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := budgetToMap(budget)
-	if warning != "" {
-		resp["warning"] = warning
+	// Create approval record for pending budgets
+	if budget.ApprovalStatus == models.ApprovalStatusPending {
+		h.repo.CreateBudgetApproval(r.Context(), &models.BudgetApproval{
+			BudgetID:      budget.ID,
+			AttemptNumber: 1,
+			Action:        "submitted",
+			ActorUserID:   budget.CreatedByUserID.String,
+			ActorEmail:    budget.CreatedByEmail.String,
+		})
 	}
-	writeJSON(w, http.StatusCreated, resp)
+
+	// Audit log
+	h.auditSvc.LogAction(r.Context(), "budget", budget.ID.String(), "created", identity, map[string]interface{}{
+		"budget_name":     budget.Name,
+		"approval_status": string(budget.ApprovalStatus),
+	})
+
+	writeJSON(w, http.StatusCreated, budgetToMap(budget))
 }
 
 // UpdateBudget updates a budget.
@@ -613,14 +802,81 @@ func (h *Handler) UpdateBudget(w http.ResponseWriter, r *http.Request) {
 		}
 		existing.ParentID = &parentID
 	}
+
+	// Get identity for permission checks
+	identity := auth.GetIdentity(r.Context())
+
+	// Isolation can only be modified by org-admins or for org entity types
+	// Isolated and AllowFallback can only be modified by org-admins or for org entity types
+	// Team users cannot change these - they inherit from parent
 	if req.Isolated != nil {
-		existing.Isolated = *req.Isolated
+		if existing.EntityType == models.EntityTypeOrg {
+			// Orgs can always set isolation
+			existing.Isolated = *req.Isolated
+		} else if identity != nil && identity.IsOrg {
+			// Org-admins can set isolation on team budgets
+			existing.Isolated = *req.Isolated
+		}
+		// Team users setting isolated is silently ignored - they inherit from parent
 	}
+
 	if req.AllowFallback != nil {
-		existing.AllowFallback = *req.AllowFallback
+		if existing.EntityType == models.EntityTypeOrg {
+			// Orgs can always set allow_fallback
+			existing.AllowFallback = *req.AllowFallback
+		} else if identity != nil && identity.IsOrg {
+			// Org-admins can set allow_fallback on team budgets
+			existing.AllowFallback = *req.AllowFallback
+		}
+		// Team users setting allow_fallback is silently ignored - they inherit from parent
 	}
+
 	if req.Enabled != nil {
-		existing.Enabled = *req.Enabled
+		if *req.Enabled {
+			// Only check permissions when actually transitioning from disabled to enabled
+			if !existing.Enabled {
+				// Enabling - check permissions
+				if identity != nil && !canEnableBudget(existing, identity) {
+					writeError(w, http.StatusForbidden, "You don't have permission to update this budget")
+					return
+				}
+				existing.Enabled = true
+				existing.DisabledByUserID = sql.NullString{}
+				existing.DisabledByEmail = sql.NullString{}
+				existing.DisabledByIsOrg = false
+				existing.DisabledAt = sql.NullTime{}
+
+				// Audit log for enable
+				if identity != nil {
+					h.auditSvc.LogAction(r.Context(), "budget", existing.ID.String(), "budget_enabled", identity, map[string]interface{}{
+						"previous_disabled_by_is_org": existing.DisabledByIsOrg,
+					})
+				}
+			}
+			// If already enabled, no action needed
+		} else {
+			// Disabling
+			existing.Enabled = false
+			if identity != nil {
+				existing.DisabledByUserID = sql.NullString{String: identity.Subject, Valid: true}
+				existing.DisabledByEmail = sql.NullString{String: identity.Email, Valid: true}
+				existing.DisabledByIsOrg = identity.IsOrg
+				existing.DisabledAt = sql.NullTime{Time: time.Now(), Valid: true}
+
+				// Audit log for disable
+				h.auditSvc.LogAction(r.Context(), "budget", existing.ID.String(), "budget_disabled", identity, map[string]interface{}{
+					"disabled_by_is_org": identity.IsOrg,
+					"cascaded":           false,
+				})
+
+				// Cascade disable to non-isolated children (org-admin only)
+				if identity.IsOrg {
+					if err := h.disableNonIsolatedChildren(r.Context(), existing.ID, identity); err != nil {
+						log.Printf("Warning: failed to cascade disable: %v", err)
+					}
+				}
+			}
+		}
 	}
 	if req.Description != nil {
 		existing.Description.Valid = true
@@ -648,13 +904,14 @@ func (h *Handler) UpdateBudget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Warn if child budget exceeds parent budget
-	var warning string
-	if existing.ParentID != nil {
+	// Validate: non-isolated child budget cannot exceed parent budget
+	if existing.ParentID != nil && !existing.Isolated {
 		parent, err := h.repo.GetBudgetByID(r.Context(), *existing.ParentID)
 		if err == nil && existing.BudgetAmountUSD > parent.BudgetAmountUSD {
-			warning = fmt.Sprintf("budget $%.4f exceeds parent budget $%.4f", existing.BudgetAmountUSD, parent.BudgetAmountUSD)
-			log.Warn().Str("child", existing.Name).Str("parent", parent.Name).Msg(warning)
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"team budget ($%.6f) cannot exceed parent org budget ($%.6f) for non-isolated budgets",
+				existing.BudgetAmountUSD, parent.BudgetAmountUSD))
+			return
 		}
 	}
 
@@ -668,14 +925,50 @@ func (h *Handler) UpdateBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := budgetToMap(existing)
-	if warning != "" {
-		resp["warning"] = warning
+	h.auditSvc.LogAction(r.Context(), "budget", id.String(), "updated", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"budget_name": existing.Name,
+	})
+
+	writeJSON(w, http.StatusOK, budgetToMap(existing))
+}
+
+// disableNonIsolatedChildren disables all non-isolated child budgets
+func (h *Handler) disableNonIsolatedChildren(ctx context.Context, parentID uuid.UUID, identity *auth.Identity) error {
+	children, err := h.repo.GetChildBudgets(ctx, parentID)
+	if err != nil {
+		return err
 	}
-	writeJSON(w, http.StatusOK, resp)
+
+	for _, child := range children {
+		if child.Isolated || !child.Enabled {
+			continue // Skip isolated or already disabled
+		}
+
+		child.Enabled = false
+		child.DisabledByUserID = sql.NullString{String: identity.Subject, Valid: true}
+		child.DisabledByEmail = sql.NullString{String: identity.Email, Valid: true}
+		child.DisabledByIsOrg = true
+		child.DisabledAt = sql.NullTime{Time: time.Now(), Valid: true}
+
+		if err := h.repo.UpdateBudget(ctx, &child); err != nil {
+			log.Printf("Warning: failed to disable child budget %s: %v", child.ID, err)
+			continue
+		}
+
+		// Audit log for cascaded disable
+		h.auditSvc.LogAction(ctx, "budget", child.ID.String(), "budget_disabled", identity, map[string]interface{}{
+			"disabled_by_is_org": true,
+			"cascaded":           true,
+			"cascaded_from":      parentID.String(),
+		})
+	}
+
+	return nil
 }
 
 // DeleteBudget deletes a budget.
+// Query params:
+//   - cascade=true: Delete all descendant budgets as well (children, grandchildren, etc.)
 func (h *Handler) DeleteBudget(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
@@ -683,6 +976,8 @@ func (h *Handler) DeleteBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid budget ID")
 		return
 	}
+
+	cascade := r.URL.Query().Get("cascade") == "true"
 
 	// Fetch budget first to get info for metrics cleanup
 	budget, err := h.repo.GetBudgetByID(r.Context(), id)
@@ -696,23 +991,59 @@ func (h *Handler) DeleteBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.repo.DeleteBudget(r.Context(), id); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "budget not found")
-			return
-		}
-		log.Error().Err(err).Str("id", id.String()).Msg("failed to delete budget")
+	// Check if budget has children
+	children, err := h.repo.GetChildBudgets(r.Context(), id)
+	if err != nil {
+		log.Error().Err(err).Str("id", id.String()).Msg("failed to check for child budgets")
 		writeError(w, http.StatusInternalServerError, "failed to delete budget")
 		return
+	}
+
+	if len(children) > 0 && !cascade {
+		writeError(w, http.StatusConflict, fmt.Sprintf("cannot delete budget: %d child budget(s) exist. Delete children first or use cascade=true.", len(children)))
+		return
+	}
+
+	var deletedCount int
+	if cascade && len(children) > 0 {
+		// Cascade delete: delete all descendants + parent in a transaction
+		deletedCount, err = h.repo.DeleteBudgetCascade(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "budget not found")
+				return
+			}
+			log.Error().Err(err).Str("id", id.String()).Msg("failed to cascade delete budget")
+			writeError(w, http.StatusInternalServerError, "failed to delete budget")
+			return
+		}
+	} else {
+		// Simple delete (no children or no cascade)
+		if err := h.repo.DeleteBudget(r.Context(), id); err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "budget not found")
+				return
+			}
+			log.Error().Err(err).Str("id", id.String()).Msg("failed to delete budget")
+			writeError(w, http.StatusInternalServerError, "failed to delete budget")
+			return
+		}
+		deletedCount = 1
 	}
 
 	// Clean up Prometheus metrics for the deleted budget
 	metrics.DeleteBudgetMetrics(string(budget.EntityType), budget.Name, string(budget.Period))
 
+	h.auditSvc.LogAction(r.Context(), "budget", id.String(), "deleted", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"budget_name":   budget.Name,
+		"cascade":       cascade,
+		"deleted_count": deletedCount,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// GetBudgetUsage gets usage history for a budget.
+// GetBudgetUsage gets usage history for a budget with pagination.
 func (h *Handler) GetBudgetUsage(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, err := uuid.Parse(vars["id"])
@@ -721,33 +1052,16 @@ func (h *Handler) GetBudgetUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse query parameters
-	since := time.Now().AddDate(0, 0, -7) // Default to last 7 days
-	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
-		parsedTime, err := time.Parse(time.RFC3339, sinceStr)
-		if err == nil {
-			since = parsedTime
-		}
-	}
+	params := parsePagination(r)
 
-	limit := 100
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		parsedLimit, err := strconv.Atoi(limitStr)
-		if err == nil && parsedLimit > 0 && parsedLimit <= 1000 {
-			limit = parsedLimit
-		}
-	}
-
-	records, err := h.repo.GetUsageByBudgetID(r.Context(), id, since, limit)
+	records, totalCount, err := h.repo.GetUsageByBudgetIDPaginated(r.Context(), id, params.Offset(), params.PageSize)
 	if err != nil {
 		log.Error().Err(err).Str("id", id.String()).Msg("failed to get usage records")
 		writeError(w, http.StatusInternalServerError, "failed to get usage records")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"usage_records": records,
-	})
+	writePaginatedJSON(w, http.StatusOK, records, params, totalCount)
 }
 
 // ResetBudget resets the usage for a budget.
@@ -759,6 +1073,20 @@ func (h *Handler) ResetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get budget details for audit log
+	budget, err := h.repo.GetBudgetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "budget not found")
+			return
+		}
+		log.Error().Err(err).Str("id", id.String()).Msg("failed to get budget")
+		writeError(w, http.StatusInternalServerError, "failed to get budget")
+		return
+	}
+
+	previousUsage := budget.CurrentUsageUSD
+
 	if err := h.repo.ResetBudgetUsage(r.Context(), id); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "budget not found")
@@ -769,8 +1097,33 @@ func (h *Handler) ResetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditSvc.LogAction(r.Context(), "budget", id.String(), "budget_reset", auth.GetIdentity(r.Context()), map[string]interface{}{
+		"budget_name":    budget.Name,
+		"previous_usage": previousUsage,
+	})
+
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "budget reset successfully",
+	})
+}
+
+// GetBudgetChildren returns all child budgets
+func (h *Handler) GetBudgetChildren(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid budget ID")
+		return
+	}
+
+	children, err := h.repo.GetChildBudgets(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get children")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data": children,
 	})
 }
 
@@ -803,9 +1156,8 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 
 // Ready returns the readiness status.
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
-	// Try to ping the database
-	_, err := h.repo.ListBudgets(r.Context())
-	if err != nil {
+	// Simple database connectivity check
+	if err := h.repo.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not ready",
 			"error":  err.Error(),

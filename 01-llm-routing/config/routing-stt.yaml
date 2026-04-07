@@ -1,0 +1,105 @@
+# ============================================================================
+# Generated YAML for use case: openai-audio-stt
+#
+# OpenAI provider configured for speech-to-text via passthrough route.
+#
+# - `/v1/audio/transcriptions` mapped as passthrough — forwarded as-is to OpenAI
+# - Single AgentgatewayBackend and HTTPRoute at `/openai`
+#
+# ============================================================================
+# Environment: aws-dev
+# Gateway referenced by HTTPRoute parentRefs:
+#   name: agentgateway
+#   namespace: agentgateway-system
+# ============================================================================
+# Copy the YAML below to apply manually or to another medium.
+# ============================================================================
+
+# --- Default Gateway (referenced by HTTPRoutes below) ---
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+
+# --- Feature: providers ---
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  ai:
+    provider:
+      openai:
+        model: whisper-1
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+    ai:
+      routes:
+        /v1/audio/transcriptions: Passthrough
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openai
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            value: /openai
+      backendRefs:
+        - name: openai
+          namespace: agentgateway-system
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /

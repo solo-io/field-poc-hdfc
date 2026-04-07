@@ -17,6 +17,8 @@ export interface ModelCost {
   effective_date: string;
   created_at: string;
   updated_at: string;
+  created_by_user_id?: string;
+  created_by_email?: string;
 }
 
 export interface CreateModelCostRequest {
@@ -52,6 +54,11 @@ export interface BudgetDefinition {
   isolated: boolean;
   allow_fallback: boolean;
   enabled: boolean;
+  disabled_by_user_id?: string;
+  disabled_by_email?: string;
+  disabled_by_is_org: boolean;
+  disabled_at?: string;
+  can_enable?: boolean;
   current_period_start: string;
   current_usage_usd: number;
   pending_usage_usd: number;
@@ -63,6 +70,10 @@ export interface BudgetDefinition {
   version?: number;
   created_at: string;
   updated_at: string;
+  approval_status?: ApprovalStatus;
+  created_by_user_id?: string;
+  created_by_email?: string;
+  rejection_count?: number;
 }
 
 export interface CreateBudgetRequest {
@@ -146,4 +157,137 @@ export interface Identity {
   org_id?: string;
   team_id?: string;
   is_org?: boolean;
+}
+
+// Approval Status
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'closed';
+
+// Budget Approval
+export interface BudgetApproval {
+  id: string;
+  budget_id: string;
+  attempt_number: number;
+  action: string;
+  actor_user_id: string;
+  actor_email?: string;
+  reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Approval with budget details (for list views)
+export interface ApprovalWithBudget extends BudgetApproval {
+  budget_name: string;
+  budget_amount_usd: number;
+  budget_period: string;
+  owner_org_id?: string;
+  owner_team_id?: string;
+  created_by_email?: string;
+  approval_status: ApprovalStatus;
+  rejection_count: number;
+}
+
+// Audit Log Entry
+export interface AuditLogEntry {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  actor_user_id?: string;
+  actor_email?: string;
+  org_id?: string;
+  team_id?: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+}
+
+// Pagination
+export interface PaginationMeta {
+  page: number;
+  page_size: number;
+  total_count: number;
+  total_pages: number;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
+}
+
+// Rate Limit Types
+export type TimeUnit = 'SECOND' | 'MINUTE' | 'HOUR' | 'DAY';
+export type Enforcement = 'enforced' | 'monitoring';
+
+export interface RateLimitAllocation {
+  id: string;
+  org_id: string;
+  team_id: string;
+  model_pattern: string;
+  token_limit?: number;
+  token_unit?: TimeUnit;
+  request_limit?: number;
+  request_unit?: TimeUnit;
+  burst_percentage: number;
+  enforcement: Enforcement;
+  enabled: boolean;
+  disabled_by_user_id?: string;
+  disabled_by_email?: string;
+  disabled_by_is_org: boolean;
+  disabled_at?: string;
+  can_enable?: boolean;
+  approval_status: ApprovalStatus;
+  approved_by?: string;
+  approved_at?: string;
+  created_by_user_id?: string;
+  created_by_email?: string;
+  description?: string;
+  rejection_count?: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RateLimitApprovalWithAllocation {
+  id: string;
+  allocation_id: string;
+  attempt_number: number;
+  action: string;
+  actor_user_id?: string;
+  actor_email?: string;
+  reason?: string;
+  team_id: string;
+  model_pattern: string;
+  org_id: string;
+  created_at: string;
+}
+
+export interface CreateRateLimitRequest {
+  org_id?: string;
+  team_id: string;
+  model_pattern: string;
+  token_limit?: number;
+  token_unit?: TimeUnit;
+  request_limit?: number;
+  request_unit?: TimeUnit;
+  burst_percentage?: number;
+  enforcement?: Enforcement;
+  enabled?: boolean;
+  description?: string;
+}
+
+export interface UpdateRateLimitRequest {
+  model_pattern?: string;
+  token_limit?: number;
+  token_unit?: TimeUnit;
+  request_limit?: number;
+  request_unit?: TimeUnit;
+  burst_percentage?: number;
+  enforcement?: Enforcement;
+  enabled?: boolean;
+  description?: string;
+  version?: number;
+}
+
+export interface ListRateLimitsResponse {
+  rate_limits: RateLimitAllocation[];
 }

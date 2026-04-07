@@ -17,8 +17,8 @@ type Config struct {
 	DatabaseURL string `envconfig:"DATABASE_URL" required:"true"`
 
 	// Cache configuration
-	ModelCostCacheTTL  time.Duration `envconfig:"MODEL_COST_CACHE_TTL" default:"60s"`
-	BudgetCacheTTL     time.Duration `envconfig:"BUDGET_CACHE_TTL" default:"30s"`
+	ModelCostCacheTTL time.Duration `envconfig:"MODEL_COST_CACHE_TTL" default:"60s"`
+	BudgetCacheTTL    time.Duration `envconfig:"BUDGET_CACHE_TTL" default:"30s"`
 
 	// Reservation configuration
 	ReservationTTL     time.Duration `envconfig:"RESERVATION_TTL" default:"5m"`
@@ -38,12 +38,27 @@ type Config struct {
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 
 	// Header names for entity identification (Option A from RFE)
-	OrgIDHeader  string `envconfig:"ORG_ID_HEADER" default:"x-org-id"`
-	TeamIDHeader string `envconfig:"TEAM_ID_HEADER" default:"x-team-id"`
+	OrgIDHeader  string `envconfig:"ORG_ID_HEADER" default:"x-gw-org-id"`
+	TeamIDHeader string `envconfig:"TEAM_ID_HEADER" default:"x-gw-team-id"`
 	UserIDHeader string `envconfig:"USER_ID_HEADER" default:"x-user-id"`
+	ModelHeader  string `envconfig:"MODEL_HEADER" default:"x-gw-llm-model"`
 
-	// Auth configuration
-	AuthEnabled bool `envconfig:"AUTH_ENABLED" default:"false"`
+	// JWT claim keys for extracting identity from Authorization Bearer token
+	// These are used as fallback when headers are not present
+	OrgIDClaim  string `envconfig:"ORG_ID_CLAIM" default:"org_id"`
+	TeamIDClaim string `envconfig:"TEAM_ID_CLAIM" default:"team_id"`
+
+	// Audit log retention
+	AuditRetentionDays int `envconfig:"AUDIT_RETENTION_DAYS" default:"90"`
+
+	// Database pool
+	DBMaxConnections int32 `envconfig:"DB_MAX_CONNECTIONS" default:"10"`
+
+	// PostgreSQL TLS
+	DBSSLMode       string `envconfig:"DB_SSL_MODE" default:"disable"`
+	DBSSLCACert     string `envconfig:"DB_SSL_CA_CERT"`
+	DBSSLClientCert string `envconfig:"DB_SSL_CLIENT_CERT"`
+	DBSSLClientKey  string `envconfig:"DB_SSL_CLIENT_KEY"`
 }
 
 // Load loads configuration from environment variables.

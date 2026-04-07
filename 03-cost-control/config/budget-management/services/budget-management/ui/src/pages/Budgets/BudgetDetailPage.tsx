@@ -21,7 +21,8 @@ import {
 } from '../../components/common/Table';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { Loading } from '../../components/common/Spinner';
-import { useApi, useMutation } from '../../hooks/useApi';
+import { useMutation } from '../../hooks/useApi';
+import { useSWRApi, CacheKeys, invalidateKey } from '../../hooks/useSWR';
 import { budgetsApi } from '../../api/budgets';
 import { ApiClientError } from '../../api/client';
 import { useAuth } from '../../contexts/AuthContext';
@@ -126,7 +127,7 @@ const SectionTitle = styled.h2`
 `;
 
 function formatCurrency(amount: number): string {
-  return `$${amount.toFixed(4)}`;
+  return `$${amount.toFixed(6)}`;
 }
 
 function formatDate(dateStr: string): string {
@@ -140,24 +141,30 @@ function formatNumber(num: number): string {
 export function BudgetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { permissions } = useAuth();
+  const { permissions, identity } = useAuth();
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [showCascadeConfirm, setShowCascadeConfirm] = useState(false);
+  const [cascadeCount, setCascadeCount] = useState(0);
 
+  // Use SWR for budget detail with background refresh
   const {
     data: budget,
     loading: budgetLoading,
     refresh: refreshBudget,
-  } = useApi(useCallback(() => (id ? budgetsApi.get(id) : Promise.reject('No ID')), [id]));
+  } = useSWRApi(id ? CacheKeys.budgetDetail(id) : null, () => budgetsApi.get(id!), {
+    refreshInterval: 30000,
+    skip: !id,
+  });
 
+  // Use SWR for usage records with background refresh
   const {
     data: usageRecords,
     loading: usageLoading,
     refresh: refreshUsage,
-  } = useApi(
-    useCallback(
-      () => (id ? budgetsApi.getUsage(id, undefined, 100) : Promise.reject('No ID')),
-      [id]
-    )
+  } = useSWRApi(
+    id ? CacheKeys.budgetUsage(id) : null,
+    () => budgetsApi.getUsage(id!, undefined, 100),
+    { refreshInterval: 30000, skip: !id }
   );
 
   const resetMutation = useMutation(budgetsApi.reset);
@@ -169,10 +176,11 @@ export function BudgetDetailPage() {
     )
   );
 
-  const handleRefresh = () => {
+  const handleRefresh = useCallback(() => {
     refreshBudget();
     refreshUsage();
-  };
+    invalidateKey(CacheKeys.sidebarStats);
+  }, [refreshBudget, refreshUsage]);
 
   const handleReset = async () => {
     if (!id) return;
@@ -187,14 +195,14 @@ export function BudgetDetailPage() {
     }
   };
 
-  const handleToggleEnabled = async () => {
+  const handleToggleEnabled = async (enabled: boolean) => {
     if (!id || !budget) return;
     try {
       await updateMutation.execute(id, {
-        enabled: !budget.enabled,
+        enabled,
         version: budget.version,
       });
-      toast.success(budget.enabled ? 'Budget disabled' : 'Budget enabled');
+      toast.success(enabled ? 'Budget enabled' : 'Budget disabled');
       handleRefresh();
     } catch (error) {
       if (error instanceof ApiClientError && error.isConflict) {
@@ -205,6 +213,25 @@ export function BudgetDetailPage() {
         toast.error(message);
       }
     }
+  };
+
+  const handleDisableClick = async () => {
+    // Only check cascade for org entity types when current user is org-admin
+    if (budget && budget.entity_type === 'org' && identity?.is_org) {
+      try {
+        const children = await budgetsApi.getChildren(budget.id);
+        const nonIsolatedEnabled = children.filter(c => !c.isolated && c.enabled);
+        if (nonIsolatedEnabled.length > 0) {
+          setCascadeCount(nonIsolatedEnabled.length);
+          setShowCascadeConfirm(true);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to check children:', err);
+      }
+    }
+    // No cascade needed, disable directly
+    await handleToggleEnabled(false);
   };
 
   if (budgetLoading) {
@@ -245,10 +272,10 @@ export function BudgetDetailPage() {
         <Button variant="secondary" onClick={handleRefresh}>
           Refresh
         </Button>
-        {permissions.canEditBudget(budget) && (
+        {permissions.canToggleBudgetEnabled && budget.can_enable !== false && (
           <Button
             variant={budget.enabled ? 'secondary' : 'primary'}
-            onClick={handleToggleEnabled}
+            onClick={budget.enabled ? handleDisableClick : () => handleToggleEnabled(true)}
             disabled={updateMutation.loading}
           >
             {budget.enabled ? 'Disable' : 'Enable'}
@@ -323,14 +350,27 @@ export function BudgetDetailPage() {
               {budget.next_period_start ? formatDate(budget.next_period_start) : '—'}
             </SummaryValue>
           </SummaryItem>
-          <SummaryItem>
-            <SummaryLabel>Isolated</SummaryLabel>
-            <SummaryValue>{budget.isolated ? 'Yes' : 'No'}</SummaryValue>
-          </SummaryItem>
+          {/* Only show Isolated for org budgets or team budgets with parent */}
+          {(budget.entity_type === 'org' || budget.parent_id) && (
+            <SummaryItem>
+              <SummaryLabel>Isolated</SummaryLabel>
+              <SummaryValue>{budget.isolated ? 'Yes' : 'No'}</SummaryValue>
+            </SummaryItem>
+          )}
           <SummaryItem>
             <SummaryLabel>Enabled</SummaryLabel>
             <SummaryValue>{budget.enabled ? 'Yes' : 'No'}</SummaryValue>
           </SummaryItem>
+          {!budget.enabled && (
+            <SummaryItem>
+              <SummaryLabel>Disabled by</SummaryLabel>
+              <SummaryValue>
+                {budget.disabled_by_email || 'Unknown'}
+                {budget.disabled_by_is_org && ' (org admin)'}
+                {budget.disabled_at && ` on ${formatDate(budget.disabled_at)}`}
+              </SummaryValue>
+            </SummaryItem>
+          )}
           <SummaryItem>
             <SummaryLabel>Description</SummaryLabel>
             <SummaryValue>{budget.description || '—'}</SummaryValue>
@@ -409,6 +449,19 @@ export function BudgetDetailPage() {
         confirmLabel="Reset"
         variant="danger"
         loading={resetMutation.loading}
+      />
+
+      <ConfirmDialog
+        open={showCascadeConfirm}
+        onClose={() => setShowCascadeConfirm(false)}
+        onConfirm={async () => {
+          setShowCascadeConfirm(false);
+          await handleToggleEnabled(false);
+        }}
+        title="Disable Budget"
+        message={`This will also disable ${cascadeCount} linked team budget${cascadeCount > 1 ? 's' : ''}. Continue?`}
+        confirmLabel="Disable All"
+        variant="danger"
       />
     </Container>
   );

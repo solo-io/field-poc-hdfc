@@ -1,6 +1,7 @@
 import styled from '@emotion/styled';
 import { colors, spacing } from '../../styles';
 import { Sidebar } from './Sidebar';
+import { Footer } from './Footer';
 
 const LayoutContainer = styled.div`
   display: flex;
@@ -10,9 +11,16 @@ const LayoutContainer = styled.div`
 
 const MainContent = styled.main`
   flex: 1;
-  padding: ${spacing[8]};
+  display: flex;
+  flex-direction: column;
   background: ${colors.background};
   overflow-x: hidden;
+  min-height: 100vh;
+`;
+
+const ContentArea = styled.div`
+  flex: 1;
+  padding: ${spacing[8]};
 `;
 
 interface AppLayoutProps {
@@ -23,7 +31,10 @@ export function AppLayout({ children }: AppLayoutProps) {
   return (
     <LayoutContainer>
       <Sidebar />
-      <MainContent>{children}</MainContent>
+      <MainContent>
+        <ContentArea>{children}</ContentArea>
+        <Footer />
+      </MainContent>
     </LayoutContainer>
   );
 }

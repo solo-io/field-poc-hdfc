@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agentgateway/budget-management/internal/cel"
-	"github.com/agentgateway/budget-management/internal/config"
-	"github.com/agentgateway/budget-management/internal/db"
-	"github.com/agentgateway/budget-management/internal/metrics"
-	"github.com/agentgateway/budget-management/internal/models"
+	"github.com/agentgateway/quota-management/internal/cel"
+	"github.com/agentgateway/quota-management/internal/config"
+	"github.com/agentgateway/quota-management/internal/db"
+	"github.com/agentgateway/quota-management/internal/metrics"
+	"github.com/agentgateway/quota-management/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -36,11 +36,20 @@ type CheckResult struct {
 	RetryAfter       time.Duration
 }
 
+// BudgetCharge represents the amount charged to a single budget.
+type BudgetCharge struct {
+	BudgetID     uuid.UUID
+	BudgetName   string
+	EntityType   string
+	ChargeAmount float64
+}
+
 // DecrementResult represents the result of a budget decrement.
 type DecrementResult struct {
 	ActualCost      float64
 	RemainingBudget float64
 	BudgetsCharged  []uuid.UUID
+	Charges         []BudgetCharge // Per-budget charge amounts
 }
 
 // Service provides budget management operations.
@@ -193,15 +202,36 @@ func (s *Service) CalculateCost(ctx context.Context, modelID string, inputTokens
 				log.Warn().Str("model", modelID).Msg("model cost not found, using default")
 			}
 			// Default: $1/1M input, $3/1M output
-			return (float64(inputTokens) * 1.0 / 1_000_000) + (float64(outputTokens) * 3.0 / 1_000_000), nil
+			totalCost := (float64(inputTokens) * 1.0 / 1_000_000) + (float64(outputTokens) * 3.0 / 1_000_000)
+			log.Debug().
+				Str("model", modelID).
+				Int64("input_tokens", inputTokens).
+				Int64("output_tokens", outputTokens).
+				Float64("input_cost_per_million", 1.0).
+				Float64("output_cost_per_million", 3.0).
+				Float64("total_cost", totalCost).
+				Msg("cost calculation (default pricing)")
+			return totalCost, nil
 		}
 		return 0, err
 	}
 
 	inputCost := float64(inputTokens) * cost.InputCostPerMillion / 1_000_000
 	outputCost := float64(outputTokens) * cost.OutputCostPerMillion / 1_000_000
+	totalCost := inputCost + outputCost
 
-	return inputCost + outputCost, nil
+	log.Debug().
+		Str("model", modelID).
+		Int64("input_tokens", inputTokens).
+		Int64("output_tokens", outputTokens).
+		Float64("input_cost_per_million", cost.InputCostPerMillion).
+		Float64("output_cost_per_million", cost.OutputCostPerMillion).
+		Float64("input_cost", inputCost).
+		Float64("output_cost", outputCost).
+		Float64("total_cost", totalCost).
+		Msg("cost calculation")
+
+	return totalCost, nil
 }
 
 // EstimateCost estimates the cost for a request before it's processed.
@@ -216,7 +246,18 @@ func (s *Service) EstimateCost(ctx context.Context, modelID string) float64 {
 		return 0.01 // $0.01 default estimate
 	}
 
-	return cost * s.cfg.DefaultEstimationMultiplier
+	estimatedCost := cost * s.cfg.DefaultEstimationMultiplier
+
+	log.Debug().
+		Str("model", modelID).
+		Int64("estimated_input_tokens", estimatedInput).
+		Int64("estimated_output_tokens", estimatedOutput).
+		Float64("base_cost", cost).
+		Float64("multiplier", s.cfg.DefaultEstimationMultiplier).
+		Float64("estimated_cost", estimatedCost).
+		Msg("pre-flight cost estimation")
+
+	return estimatedCost
 }
 
 // CheckBudget checks if there's enough budget for a request.
@@ -338,7 +379,199 @@ func (s *Service) CheckBudget(ctx context.Context, evalCtx *cel.EvalContext, mod
 	}, nil
 }
 
+// CheckAndReserveBudget atomically checks budget availability and creates a reservation.
+// This prevents race conditions when multiple ext-proc pods check the same budget concurrently.
+// The entire operation happens within a single transaction with row-level locks.
+func (s *Service) CheckAndReserveBudget(ctx context.Context, evalCtx *cel.EvalContext, modelID, requestID string) (*CheckResult, error) {
+	// Start transaction
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	// Get all enabled budgets with row locks (FOR UPDATE)
+	// This blocks other transactions trying to check the same budgets
+	budgets, err := s.repo.GetEnabledBudgetsForUpdate(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get budgets for update: %w", err)
+	}
+
+	if len(budgets) == 0 {
+		// No budgets configured, allow the request (no reservation needed)
+		_ = tx.Commit(ctx)
+		return &CheckResult{
+			Allowed:        true,
+			MatchedBudgets: nil,
+		}, nil
+	}
+
+	// Filter budgets by CEL expression (within the lock)
+	var matched []models.BudgetDefinition
+	for _, b := range budgets {
+		match, evalErr := s.celEvaluator.Evaluate(b.MatchExpression, evalCtx)
+		if evalErr != nil {
+			log.Warn().Err(evalErr).Str("budget_id", b.ID.String()).Msg("failed to evaluate CEL expression")
+			continue
+		}
+		if match {
+			matched = append(matched, b)
+		}
+	}
+
+	if len(matched) == 0 {
+		// No matching budgets, allow the request
+		_ = tx.Commit(ctx)
+		return &CheckResult{
+			Allowed:        true,
+			MatchedBudgets: nil,
+		}, nil
+	}
+
+	// Calculate estimated cost
+	estimatedCost := s.EstimateCost(ctx, modelID)
+
+	// Sort budgets by hierarchy (children first, parents last)
+	sortedBudgets := sortBudgetsByHierarchy(matched)
+
+	// Build parent map for fallback logic
+	parentMap := make(map[uuid.UUID]*models.BudgetDefinition)
+	for i := range sortedBudgets {
+		b := &sortedBudgets[i]
+		if b.ParentID != nil {
+			for j := range sortedBudgets {
+				if sortedBudgets[j].ID == *b.ParentID {
+					parentMap[b.ID] = &sortedBudgets[j]
+					break
+				}
+			}
+		}
+	}
+
+	// Check each budget (using fresh data from locked rows)
+	var rateLimitedAt *uuid.UUID
+	var fallbackBudgetID *uuid.UUID
+	var minRemaining float64 = -1
+
+	for _, budget := range sortedBudgets {
+		remaining := budget.CalculateRemaining()
+
+		if minRemaining < 0 || remaining < minRemaining {
+			minRemaining = remaining
+		}
+
+		if remaining < estimatedCost {
+			// Budget exceeded - check fallback
+			if budget.AllowFallback && budget.ParentID != nil {
+				parent := parentMap[budget.ID]
+				if parent != nil && parent.CalculateRemaining() >= estimatedCost {
+					parentID := parent.ID
+					fallbackBudgetID = &parentID
+					metrics.RecordBudgetFallback(
+						string(budget.EntityType),
+						budget.Name,
+						string(parent.EntityType),
+						parent.Name,
+					)
+					continue
+				}
+			}
+
+			budgetID := budget.ID
+			rateLimitedAt = &budgetID
+
+			if budget.Isolated {
+				break
+			}
+		}
+	}
+
+	if rateLimitedAt != nil {
+		// Rate limited - rollback and return
+		_ = tx.Rollback(ctx)
+
+		var retryAfter time.Duration
+		for _, b := range sortedBudgets {
+			if b.ID == *rateLimitedAt {
+				retryAfter = time.Until(b.NextPeriodStart())
+				break
+			}
+		}
+
+		return &CheckResult{
+			Allowed:         false,
+			MatchedBudgets:  sortedBudgets,
+			RateLimitedAt:   rateLimitedAt,
+			EstimatedCost:   estimatedCost,
+			RemainingBudget: minRemaining,
+			RetryAfter:      retryAfter,
+		}, nil
+	}
+
+	// Budget check passed - create reservations atomically
+	expiresAt := time.Now().Add(s.cfg.ReservationTTL)
+
+	for _, budget := range sortedBudgets {
+		res := &models.RequestReservation{
+			BudgetID:         budget.ID,
+			RequestID:        requestID,
+			EstimatedCostUSD: estimatedCost,
+			ExpiresAt:        expiresAt,
+		}
+
+		if createErr := s.repo.CreateReservationInTx(ctx, tx, res); createErr != nil {
+			log.Warn().Err(createErr).
+				Str("budget_id", budget.ID.String()).
+				Str("request_id", requestID).
+				Msg("failed to create reservation in tx")
+			continue
+		}
+
+		// Increment pending usage within the same transaction
+		if pendingErr := s.repo.IncrementPendingUsageInTx(ctx, tx, budget.ID, estimatedCost); pendingErr != nil {
+			log.Warn().Err(pendingErr).
+				Str("budget_id", budget.ID.String()).
+				Msg("failed to increment pending usage in tx")
+			continue
+		}
+
+		metrics.ActiveReservations.Inc()
+		metrics.ReservationsCreatedTotal.Inc()
+	}
+
+	// Commit transaction - this releases the row locks
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Invalidate cache since we modified pending_usage
+	s.budgetCache.Lock()
+	s.budgetCache.expiresAt = time.Time{}
+	s.budgetCache.Unlock()
+
+	log.Debug().
+		Str("request_id", requestID).
+		Str("model", modelID).
+		Float64("estimated_cost", estimatedCost).
+		Float64("remaining", minRemaining).
+		Int("matched_budgets", len(sortedBudgets)).
+		Msg("atomic budget check and reserve passed")
+
+	return &CheckResult{
+		Allowed:          true,
+		MatchedBudgets:   sortedBudgets,
+		FallbackBudgetID: fallbackBudgetID,
+		EstimatedCost:    estimatedCost,
+		RemainingBudget:  minRemaining,
+	}, nil
+}
+
 // CreateReservation creates a budget reservation for a request.
+// Deprecated: Use CheckAndReserveBudget for atomic check-and-reserve.
 func (s *Service) CreateReservation(ctx context.Context, requestID string, budgets []models.BudgetDefinition, estimatedCost float64) error {
 	expiresAt := time.Now().Add(s.cfg.ReservationTTL)
 
@@ -383,6 +616,17 @@ func (s *Service) DecrementBudgets(ctx context.Context, requestID string, modelI
 		return nil, err
 	}
 
+	// Log actual vs estimated cost comparison
+	log.Debug().
+		Str("request_id", requestID).
+		Str("model", modelID).
+		Int64("actual_input_tokens", inputTokens).
+		Int64("actual_output_tokens", outputTokens).
+		Float64("actual_cost", actualCost).
+		Float64("estimated_cost", res.EstimatedCostUSD).
+		Float64("estimation_accuracy", actualCost/res.EstimatedCostUSD).
+		Msg("actual vs estimated cost")
+
 	// Get budget hierarchy
 	budgets, err := s.repo.GetBudgetsWithParent(ctx, res.BudgetID)
 	if err != nil {
@@ -401,23 +645,30 @@ func (s *Service) DecrementBudgets(ctx context.Context, requestID string, modelI
 	}()
 
 	var chargedBudgets []uuid.UUID
+	var charges []BudgetCharge
 	var minRemaining float64 = -1
+	remainingCostToCharge := actualCost
 
-	for _, budget := range budgets {
+	// Sort budgets: children first, parents last (team -> org -> provider)
+	// This ensures we fill child budgets before spilling to parents
+	sortedBudgets := sortBudgetsByHierarchy(budgets)
+
+	for _, budget := range sortedBudgets {
 		shouldCharge := true
 		parentCharged := true
+		chargeAmount := remainingCostToCharge
 
 		// Check if this is a parent of a rate-limited isolated budget
 		if rateLimitedAt != nil && budget.ID != *rateLimitedAt {
 			// Check if this budget is an ancestor of the rate-limited budget
-			for _, b := range budgets {
+			for _, b := range sortedBudgets {
 				if b.ID == *rateLimitedAt && b.Isolated {
 					// This budget is an ancestor of an isolated rate-limited budget
 					// Don't charge parent budgets
 					if budget.ParentID == nil || budget.ID != *rateLimitedAt {
 						// This is a parent, skip charging
 						isParent := false
-						for _, ancestor := range budgets {
+						for _, ancestor := range sortedBudgets {
 							if ancestor.ParentID != nil && *ancestor.ParentID == budget.ID {
 								isParent = true
 								break
@@ -433,22 +684,66 @@ func (s *Service) DecrementBudgets(ctx context.Context, requestID string, modelI
 			}
 		}
 
-		if shouldCharge {
+		// For non-isolated child budgets, implement "bucket fill" logic:
+		// Charge up to the budget's remaining capacity, overflow goes to parent
+		// Note: Don't count pending_usage here - we're converting pending to actual,
+		// and pending includes reservations that will be released (including this request's)
+		if shouldCharge && !budget.Isolated && budget.ParentID != nil {
+			budgetRemaining := budget.BudgetAmountUSD - budget.CurrentUsageUSD
+			log.Debug().
+				Str("request_id", requestID).
+				Str("budget_name", budget.Name).
+				Float64("budget_amount", budget.BudgetAmountUSD).
+				Float64("current_usage", budget.CurrentUsageUSD).
+				Float64("budget_remaining", budgetRemaining).
+				Float64("cost_to_charge", remainingCostToCharge).
+				Msg("bucket fill calculation")
+			if budgetRemaining <= 0 {
+				// Budget already exhausted, all cost goes to parent
+				chargeAmount = 0
+			} else if remainingCostToCharge > budgetRemaining {
+				// Partial charge: fill this budget, rest goes to parent
+				chargeAmount = budgetRemaining
+			}
+			// else: full cost fits in this budget
+		}
+
+		if shouldCharge && chargeAmount > 0 {
 			// Increment usage
-			if err = s.repo.IncrementUsageInTx(ctx, tx, budget.ID, actualCost); err != nil {
+			if err = s.repo.IncrementUsageInTx(ctx, tx, budget.ID, chargeAmount); err != nil {
 				return nil, err
 			}
 			chargedBudgets = append(chargedBudgets, budget.ID)
+			charges = append(charges, BudgetCharge{
+				BudgetID:     budget.ID,
+				BudgetName:   budget.Name,
+				EntityType:   string(budget.EntityType),
+				ChargeAmount: chargeAmount,
+			})
+
+			// For non-isolated budgets, subtract what we charged from remaining
+			if !budget.Isolated {
+				remainingCostToCharge -= chargeAmount
+			}
+
+			log.Debug().
+				Str("request_id", requestID).
+				Str("budget_name", budget.Name).
+				Str("entity_type", string(budget.EntityType)).
+				Float64("charge_amount", chargeAmount).
+				Float64("remaining_to_charge", remainingCostToCharge).
+				Bool("isolated", budget.Isolated).
+				Msg("budget charged")
 		}
 
-		// Create usage record
+		// Create usage record with the amount actually charged to this budget
 		ur := &models.UsageRecord{
 			BudgetID:      budget.ID,
 			RequestID:     requestID,
 			ModelID:       modelID,
 			InputTokens:   inputTokens,
 			OutputTokens:  outputTokens,
-			CostUSD:       actualCost,
+			CostUSD:       chargeAmount,
 			ParentCharged: parentCharged,
 		}
 		if err = s.repo.CreateUsageRecordInTx(ctx, tx, ur); err != nil {
@@ -456,7 +751,7 @@ func (s *Service) DecrementBudgets(ctx context.Context, requestID string, modelI
 		}
 
 		// Calculate remaining after decrement
-		remaining := budget.BudgetAmountUSD - budget.CurrentUsageUSD - actualCost - budget.PendingUsageUSD
+		remaining := budget.BudgetAmountUSD - budget.CurrentUsageUSD - chargeAmount - budget.PendingUsageUSD
 		if minRemaining < 0 || remaining < minRemaining {
 			minRemaining = remaining
 		}
@@ -488,6 +783,7 @@ func (s *Service) DecrementBudgets(ctx context.Context, requestID string, modelI
 		ActualCost:      actualCost,
 		RemainingBudget: minRemaining,
 		BudgetsCharged:  chargedBudgets,
+		Charges:         charges,
 	}, nil
 }
 

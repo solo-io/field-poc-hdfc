@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import styled from '@emotion/styled';
 import toast from 'react-hot-toast';
-import { spacing, colors, fontSize } from '../../styles';
+import { spacing, colors, fontSize, radius } from '../../styles';
 import { PageHeader } from '../../components/layout/PageHeader';
 import { Button } from '../../components/common/Button';
 import {
@@ -17,7 +17,9 @@ import {
 } from '../../components/common/Table';
 import { ConfirmDialog } from '../../components/common/ConfirmDialog';
 import { Loading } from '../../components/common/Spinner';
-import { useApi, useMutation } from '../../hooks/useApi';
+import { Pagination } from '../../components/common/Pagination';
+import { useMutation } from '../../hooks/useApi';
+import { useSWRApi, CacheKeys } from '../../hooks/useSWR';
 import { modelCostsApi } from '../../api/model-costs';
 import { ModelCost, CreateModelCostRequest } from '../../api/types';
 import { ModelCostForm } from './ModelCostForm';
@@ -44,6 +46,55 @@ const ActionButton = styled.button`
   }
 `;
 
+const PaginationWrapper = styled.div`
+  display: flex;
+  justify-content: flex-end;
+  padding: ${spacing[4]} 0;
+`;
+
+const FiltersRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: ${spacing[3]};
+  margin-bottom: ${spacing[6]};
+  align-items: flex-end;
+`;
+
+const FilterGroup = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: ${spacing[1]};
+`;
+
+const FilterLabel = styled.label`
+  font-size: ${fontSize.xs};
+  color: ${colors.mutedForeground};
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+`;
+
+const FilterSelect = styled.select`
+  background: ${colors.cardBg};
+  border: 1px solid ${colors.border};
+  color: ${colors.foreground};
+  font-size: ${fontSize.sm};
+  padding: ${spacing[2]} ${spacing[3]};
+  border-radius: ${radius.md};
+  min-width: 140px;
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: ${colors.primary};
+  }
+
+  option {
+    background: ${colors.cardBg};
+    color: ${colors.foreground};
+  }
+`;
+
 function formatCost(cost: number): string {
   if (cost === 0) return '$0.00';
   if (cost >= 1) return `$${cost.toFixed(2)}`;
@@ -53,13 +104,47 @@ function formatCost(cost: number): string {
   return `$${cost.toPrecision(2)}`;
 }
 
+function formatDate(dateStr: string): string {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 export function ModelCostsPage() {
   const { permissions } = useAuth();
   const [formOpen, setFormOpen] = useState(false);
   const [editingCost, setEditingCost] = useState<ModelCost | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ModelCost | null>(null);
+  const [page, setPage] = useState(1);
+  const [provider, setProvider] = useState('');
+  const [providers, setProviders] = useState<string[]>([]);
+  const [sort, setSort] = useState('');
 
-  const { data: costs, loading, refresh } = useApi(useCallback(() => modelCostsApi.list(), []));
+  // Fetch providers list with SWR
+  const { data: providersData } = useSWRApi('model-costs:providers', modelCostsApi.providers, {
+    revalidateOnFocus: false,
+  });
+  useEffect(() => {
+    if (providersData) {
+      setProviders(providersData);
+    }
+  }, [providersData]);
+
+  const [sortBy, sortDir] = sort ? (sort.split(':') as [string, string]) : ['', 'asc'];
+
+  // Use SWR for model costs list with background refresh
+  const {
+    data: pageData,
+    loading,
+    refresh,
+  } = useSWRApi(
+    `${CacheKeys.modelCosts}?page=${page}&provider=${provider}&sort=${sort}`,
+    () => modelCostsApi.list(page, 30, provider, sortBy, sortDir),
+    { refreshInterval: 30000 }
+  );
+
+  const costs = pageData?.data ?? null;
+  const pagination = pageData?.pagination ?? null;
 
   const createMutation = useMutation(modelCostsApi.create);
   const updateMutation = useMutation(
@@ -110,57 +195,150 @@ export function ModelCostsPage() {
     }
   };
 
+  const handlePageChange = (newPage: number) => {
+    setPage(newPage);
+  };
+
+  const handleSortClick = (col: 'input' | 'output') => {
+    if (col === 'input') {
+      if (sort === 'input_cost:asc') setSort('both:asc');
+      else if (sort === 'both:asc') setSort('both:desc');
+      else if (sort === 'both:desc') setSort('');
+      else setSort('input_cost:asc');
+    } else {
+      if (sort === 'output_cost:asc') setSort('output_cost:desc');
+      else if (sort === 'output_cost:desc') setSort('');
+      else setSort('output_cost:asc');
+    }
+    setPage(1);
+  };
+
+  const getSortIndicator = (col: 'input' | 'output'): string => {
+    if (col === 'input') {
+      if (sort === 'input_cost:asc' || sort === 'both:asc') return ' ↑';
+      if (sort === 'both:desc') return ' ↓';
+      return '';
+    } else {
+      if (sort === 'output_cost:asc' || sort === 'both:asc') return ' ↑';
+      if (sort === 'output_cost:desc' || sort === 'both:desc') return ' ↓';
+      return '';
+    }
+  };
+
   return (
     <Container>
-      <PageHeader title="Model Costs" description="Configure pricing for LLM models">
+      <PageHeader
+        title="Model Costs"
+        description="Configure pricing for LLM models. All costs are in USD per million tokens."
+      >
         <Button variant="secondary" onClick={refresh}>
           Refresh
         </Button>
         {permissions.canManageModelCosts && <Button onClick={handleCreate}>Add Model Cost</Button>}
       </PageHeader>
 
+      <FiltersRow>
+        <FilterGroup>
+          <FilterLabel htmlFor="provider-filter">Provider</FilterLabel>
+          <FilterSelect
+            id="provider-filter"
+            value={provider}
+            onChange={e => {
+              setProvider(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All Providers</option>
+            {providers.map(p => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </FilterSelect>
+        </FilterGroup>
+      </FiltersRow>
+
       {loading ? (
         <Loading />
       ) : costs && costs.length > 0 ? (
-        <TableContainer>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeader>Model ID</TableHeader>
-                <TableHeader>Provider</TableHeader>
-                <TableHeader align="right">Input Cost</TableHeader>
-                <TableHeader align="right">Output Cost</TableHeader>
-                <TableHeader>Pattern</TableHeader>
-                {permissions.canManageModelCosts && (
-                  <TableHeader align="right">Actions</TableHeader>
-                )}
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {costs.map(cost => (
-                <TableRow key={cost.model_id}>
-                  <TableCell>{cost.model_id}</TableCell>
-                  <TableCell>{cost.provider}</TableCell>
-                  <TableCell align="right">{formatCost(cost.input_cost_per_million)}</TableCell>
-                  <TableCell align="right">{formatCost(cost.output_cost_per_million)}</TableCell>
-                  <TableCell>{cost.model_pattern || '—'}</TableCell>
-                  <TableCell align="right">
-                    {permissions.canManageModelCosts && (
-                      <ActionButtons>
-                        <ActionButton onClick={() => handleEdit(cost)}>Edit</ActionButton>
-                        <ActionButton onClick={() => setDeleteTarget(cost)}>Delete</ActionButton>
-                      </ActionButtons>
-                    )}
-                  </TableCell>
+        <>
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableHeader>Model ID</TableHeader>
+                  <TableHeader>Provider</TableHeader>
+                  <TableHeader
+                    align="right"
+                    onClick={() => handleSortClick('input')}
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                  >
+                    Input Cost{getSortIndicator('input')}
+                  </TableHeader>
+                  <TableHeader
+                    align="right"
+                    onClick={() => handleSortClick('output')}
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                  >
+                    Output Cost{getSortIndicator('output')}
+                  </TableHeader>
+                  <TableHeader>Pattern</TableHeader>
+                  <TableHeader>Created At</TableHeader>
+                  <TableHeader>Created By</TableHeader>
+                  {permissions.canManageModelCosts && (
+                    <TableHeader align="right">Actions</TableHeader>
+                  )}
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
+              </TableHead>
+              <TableBody>
+                {costs.map(cost => (
+                  <TableRow key={cost.model_id}>
+                    <TableCell>{cost.model_id}</TableCell>
+                    <TableCell>{cost.provider}</TableCell>
+                    <TableCell align="right">{formatCost(cost.input_cost_per_million)}</TableCell>
+                    <TableCell align="right">{formatCost(cost.output_cost_per_million)}</TableCell>
+                    <TableCell>{cost.model_pattern || '—'}</TableCell>
+                    <TableCell>
+                      <span style={{ fontSize: fontSize.xs, color: colors.mutedForeground }}>
+                        {formatDate(cost.created_at)}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <span style={{ fontSize: fontSize.xs, color: colors.mutedForeground }}>
+                        {cost.created_by_email || cost.created_by_user_id || 'System'}
+                      </span>
+                    </TableCell>
+                    {permissions.canManageModelCosts && (
+                      <TableCell align="right">
+                        <ActionButtons>
+                          <ActionButton onClick={() => handleEdit(cost)}>Edit</ActionButton>
+                          <ActionButton onClick={() => setDeleteTarget(cost)}>Delete</ActionButton>
+                        </ActionButtons>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+          {pagination && pagination.total_pages > 1 && (
+            <PaginationWrapper>
+              <Pagination
+                page={pagination.page}
+                totalPages={pagination.total_pages}
+                onPageChange={handlePageChange}
+              />
+            </PaginationWrapper>
+          )}
+        </>
       ) : (
         <EmptyState>
-          <EmptyStateText>No model costs configured yet.</EmptyStateText>
-          {permissions.canManageModelCosts && (
+          <EmptyStateText>
+            {provider
+              ? 'No model costs found for this provider.'
+              : 'No model costs configured yet.'}
+          </EmptyStateText>
+          {!provider && permissions.canManageModelCosts && (
             <Button onClick={handleCreate}>Add Model Cost</Button>
           )}
         </EmptyState>

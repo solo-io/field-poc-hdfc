@@ -106,7 +106,7 @@ func (e *Evaluator) Compile(expression string) (cel.Program, error) {
 	// Parse and check the expression
 	ast, issues := e.env.Compile(expression)
 	if issues != nil && issues.Err() != nil {
-		return nil, fmt.Errorf("failed to compile expression: %w", issues.Err())
+		return nil, fmt.Errorf("invalid CEL expression")
 	}
 
 	// Create the program

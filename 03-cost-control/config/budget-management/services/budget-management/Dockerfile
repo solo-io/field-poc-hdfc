@@ -1,19 +1,19 @@
 # UI build stage - use BUILDPLATFORM to avoid QEMU emulation issues with esbuild
-FROM --platform=$BUILDPLATFORM node:20-alpine AS ui-builder
+FROM --platform=$BUILDPLATFORM oven/bun:1-alpine AS ui-builder
 
 WORKDIR /ui
 
 # Copy package files
-COPY ui/package.json ui/yarn.lock ./
+COPY ui/package.json ui/bun.lock ./
 
 # Install dependencies
-RUN yarn install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # Copy source code
 COPY ui/ ./
 
 # Build the UI
-RUN yarn build
+RUN bun run build
 
 # Go build stage
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
@@ -37,7 +37,7 @@ COPY . .
 # Build the binary for target architecture
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s" \
-    -o /budget-management \
+    -o /quota-management \
     ./cmd/server
 
 # Runtime stage
@@ -52,7 +52,7 @@ RUN adduser -D -u 1000 appuser
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /budget-management /app/budget-management
+COPY --from=builder /quota-management /app/quota-management
 
 # Copy migrations
 COPY --from=builder /app/migrations /app/migrations
@@ -71,4 +71,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -qO- http://localhost:8080/health || exit 1
 
 # Run the server
-ENTRYPOINT ["/app/budget-management"]
+ENTRYPOINT ["/app/quota-management"]

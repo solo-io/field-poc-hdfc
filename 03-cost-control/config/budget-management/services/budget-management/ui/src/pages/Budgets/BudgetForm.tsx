@@ -40,12 +40,17 @@ const InfoText = styled.div`
   margin-top: ${spacing[1]};
 `;
 
+interface ParentCandidate {
+  id: string;
+  name: string;
+}
+
 interface BudgetFormProps {
   open: boolean;
   onClose: () => void;
   onSubmit: (data: CreateBudgetRequest) => Promise<void>;
   editingBudget?: BudgetDefinition | null;
-  availableBudgets?: BudgetDefinition[];
+  parentCandidates?: ParentCandidate[];
   loading?: boolean;
 }
 
@@ -54,7 +59,7 @@ export function BudgetForm({
   onClose,
   onSubmit,
   editingBudget,
-  availableBudgets = [],
+  parentCandidates = [],
   loading = false,
 }: BudgetFormProps) {
   const { identity, permissions } = useAuth();
@@ -68,7 +73,7 @@ export function BudgetForm({
     budget_amount_usd: 100,
     period: 'monthly',
     warning_threshold_pct: 80,
-    isolated: true,
+    isolated: false, // Default to non-isolated
     allow_fallback: false,
     enabled: true,
     owner_org_id: identity?.org_id,
@@ -102,7 +107,11 @@ export function BudgetForm({
     }
   }, []);
 
+  // Reset form only when modal opens or when switching between create/edit modes
+  // Removed identity from dependencies - it's only needed for initial values and doesn't change
   useEffect(() => {
+    if (!open) return; // Only reset when modal is opening
+
     if (editingBudget) {
       setFormData({
         entity_type: editingBudget.entity_type,
@@ -132,7 +141,7 @@ export function BudgetForm({
         budget_amount_usd: 100,
         period: 'monthly',
         warning_threshold_pct: 80,
-        isolated: true,
+        isolated: false, // Default to non-isolated
         allow_fallback: false,
         enabled: true,
         owner_org_id: identity?.org_id,
@@ -143,7 +152,8 @@ export function BudgetForm({
       setCustomPeriodStr('');
       setCelError(null);
     }
-  }, [editingBudget, open, identity]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingBudget, open]); // identity intentionally omitted - only needed for initial values
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -196,7 +206,7 @@ export function BudgetForm({
         <Row>
           <FormField
             label="Entity Type"
-            tooltip="The type of entity this budget applies to. Provider budgets limit spend on a specific LLM provider. Team budgets limit spend for a group identified by request headers."
+            tooltip={`The type of entity this budget applies to.\nProvider: Limits spend on a specific LLM provider.\nOrganization: Limits spend for the entire org.\nTeam: Limits spend for a specific team.`}
             fullWidth
           >
             <Select
@@ -211,7 +221,7 @@ export function BudgetForm({
           </FormField>
           <FormField
             label="Name"
-            tooltip="A unique identifier for this budget. Used for display and reference purposes."
+            tooltip={`A unique identifier for this budget.\nUsed for display and reference purposes.`}
             fullWidth
           >
             <Input
@@ -223,6 +233,39 @@ export function BudgetForm({
             />
           </FormField>
         </Row>
+        {(isOrgAdmin || isTeamMember) && (
+          <Row>
+            <FormField
+              label="Organization"
+              tooltip={`The organization that owns this budget.\nAutomatically set to your organization.`}
+              fullWidth
+            >
+              <Input value={formData.owner_org_id || ''} disabled placeholder="Your organization" />
+            </FormField>
+            {formData.entity_type !== 'org' &&
+              (isOrgAdmin ? (
+                <FormField
+                  label="Team (Optional)"
+                  tooltip={`Optionally assign this budget to a specific team within your organization.\nLeave empty for an org-level budget.`}
+                  fullWidth
+                >
+                  <Input
+                    value={formData.owner_team_id || ''}
+                    onChange={e => handleChange('owner_team_id', e.target.value || undefined)}
+                    placeholder="e.g., ml-platform, data-science"
+                  />
+                </FormField>
+              ) : (
+                <FormField
+                  label="Team"
+                  tooltip={`The team this budget belongs to.\nAutomatically set to your team.`}
+                  fullWidth
+                >
+                  <Input value={formData.owner_team_id || ''} disabled />
+                </FormField>
+              ))}
+          </Row>
+        )}
         <Row>
           <FormField label="Budget Amount (USD)" fullWidth>
             <Input
@@ -250,7 +293,7 @@ export function BudgetForm({
           </FormField>
           <FormField
             label="Period"
-            tooltip="How often the budget resets. Hourly, daily, weekly, and monthly periods align to calendar boundaries (start of hour, midnight UTC, Monday, 1st of month). Custom allows specifying an exact duration in seconds."
+            tooltip={`How often the budget resets.\nHourly/Daily/Weekly/Monthly: Align to calendar boundaries (start of hour, midnight UTC, Monday, 1st of month).\nCustom: Specify an exact duration in seconds.`}
             fullWidth
           >
             <Select
@@ -292,7 +335,7 @@ export function BudgetForm({
         )}
         <FormField
           label="Match Expression (CEL)"
-          tooltip='CEL expression that determines which requests this budget applies to. Use "true" to match all requests, or filter by headers (request.headers["x-team"]), path (request.path.startsWith("/openai")), or other request attributes.'
+          tooltip={`CEL expression that determines which requests this budget applies to.\nUse "true" to match all requests.\nExamples:\n- request.headers["x-team"] == "ml-platform"\n- request.path.startsWith("/openai")`}
           fullWidth
         >
           <Textarea
@@ -306,11 +349,17 @@ export function BudgetForm({
             <ErrorText style={{ color: colors.mutedForeground }}>Validating...</ErrorText>
           )}
           {celError && !celValidating && <ErrorText>{celError}</ErrorText>}
+          <InfoText>
+            Test expressions in the{' '}
+            <a href="https://playcel.undistro.io/" target="_blank" rel="noopener noreferrer">
+              CEL Playground
+            </a>
+          </InfoText>
         </FormField>
         <Row>
           <FormField
             label="Warning Threshold (%)"
-            tooltip="Percentage of budget usage that triggers a warning. When usage exceeds this threshold, alerts are generated but requests are still allowed until 100% is reached."
+            tooltip={`Percentage of budget usage that triggers a warning.\nAlerts are generated when usage exceeds this threshold.\nRequests are still allowed until 100% is reached.`}
             fullWidth
           >
             <Input
@@ -336,60 +385,8 @@ export function BudgetForm({
             />
           </FormField>
           <FormField
-            label="Isolated"
-            tooltip="When enabled, this budget is evaluated independently. When disabled, usage counts against both this budget AND any parent budgets in the hierarchy (e.g., team budget also counts against org budget)."
-            fullWidth
-          >
-            <Select
-              value={formData.isolated ? 'true' : 'false'}
-              onChange={e => handleChange('isolated', e.target.value === 'true')}
-            >
-              <option value="true">Yes</option>
-              <option value="false">No</option>
-            </Select>
-          </FormField>
-        </Row>
-        {formData.entity_type === 'team' && (
-          <Row>
-            <FormField
-              label="Parent Budget (Organization)"
-              tooltip="Optional parent organization budget. When set and Isolated is disabled, usage counts against both the team budget and the parent org budget."
-              fullWidth
-            >
-              <Select
-                value={formData.parent_id || ''}
-                onChange={e => handleChange('parent_id', e.target.value || undefined)}
-              >
-                <option value="">None (standalone team budget)</option>
-                {availableBudgets
-                  .filter(b => b.id !== editingBudget?.id && b.entity_type === 'org')
-                  .map(budget => (
-                    <option key={budget.id} value={budget.id}>
-                      {budget.name} - ${budget.budget_amount_usd}/{budget.period}
-                    </option>
-                  ))}
-              </Select>
-            </FormField>
-            <FormField
-              label="Allow Fallback"
-              tooltip="When enabled and this team budget is exhausted, requests fall back to the parent org budget if it has remaining balance."
-              fullWidth
-            >
-              <Select
-                value={formData.allow_fallback ? 'true' : 'false'}
-                onChange={e => handleChange('allow_fallback', e.target.value === 'true')}
-                disabled={!formData.parent_id}
-              >
-                <option value="false">No (block when exhausted)</option>
-                <option value="true">Yes (use org budget)</option>
-              </Select>
-            </FormField>
-          </Row>
-        )}
-        <Row>
-          <FormField
             label="Enabled"
-            tooltip="When disabled, this budget is not enforced and requests bypass this budget's limits. All other settings are preserved and take effect when the budget is re-enabled."
+            tooltip={`Controls whether this budget is enforced.\nYes (default): Budget limits are enforced.\nNo: Requests bypass this budget's limits.`}
             fullWidth
           >
             <Select
@@ -399,64 +396,117 @@ export function BudgetForm({
               <option value="true">Yes (enforce budget)</option>
               <option value="false">No (bypass limits)</option>
             </Select>
-            {!formData.enabled && (
-              <InfoText>
-                Budget is disabled. Isolated and Allow Fallback settings will take effect when
-                enabled.
-              </InfoText>
-            )}
-          </FormField>
-          <FormField label="Description" fullWidth>
-            <Input
-              value={formData.description || ''}
-              onChange={e => handleChange('description', e.target.value || undefined)}
-              placeholder="Optional description"
-            />
           </FormField>
         </Row>
-        {(isOrgAdmin || isTeamMember) && (
+        {/* Team-specific: Parent Budget selection */}
+        {formData.entity_type === 'team' && (
+          <FormField
+            label="Parent Budget (Organization)"
+            tooltip={`Link this team budget to a parent org budget.\nTeam budgets inherit Isolated and Allow Fallback settings from their parent.`}
+            fullWidth
+          >
+            <Select
+              value={formData.parent_id || ''}
+              onChange={e => handleChange('parent_id', e.target.value || undefined)}
+            >
+              <option value="">None (standalone team budget)</option>
+              {parentCandidates
+                .filter(c => c.id !== editingBudget?.id)
+                .map(candidate => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.name}
+                  </option>
+                ))}
+            </Select>
+          </FormField>
+        )}
+        {/* Org: Isolated + Allow Fallback (Allow Fallback disabled when Isolated) */}
+        {formData.entity_type === 'org' && (
           <Row>
             <FormField
-              label="Owner Organization"
-              tooltip="The organization that owns this budget. Budgets are automatically assigned to your organization."
+              label="Isolated"
+              tooltip={`Controls how team budget usage is tracked.\nNo (default): Team usage counts against both the team budget and this org budget.\nYes: Each team tracks usage independently without affecting org totals.\nNote: When Isolated is Yes, Allow Fallback is not available.`}
               fullWidth
             >
-              <Input value={formData.owner_org_id || ''} disabled placeholder="Your organization" />
-              <InfoText>Automatically set to your organization</InfoText>
+              <Select
+                value={formData.isolated ? 'true' : 'false'}
+                onChange={e => {
+                  const isIsolated = e.target.value === 'true';
+                  handleChange('isolated', isIsolated);
+                  // Clear allow_fallback when isolated (they're mutually exclusive)
+                  if (isIsolated) {
+                    handleChange('allow_fallback', false);
+                  }
+                }}
+              >
+                <option value="false">No (default)</option>
+                <option value="true">Yes</option>
+              </Select>
             </FormField>
-            {isOrgAdmin ? (
+            {!formData.isolated && (
               <FormField
-                label="Assign to Team (Optional)"
-                tooltip="Optionally assign this budget to a specific team within your organization. Leave empty for an org-level budget."
+                label="Allow Fallback"
+                tooltip={`Controls what happens when a team budget is exhausted.\nNo (default): Requests are blocked.\nYes: Requests fall back to this org budget if it has remaining balance.\nNote: Only available when Isolated is No.`}
                 fullWidth
               >
-                <Input
-                  value={formData.owner_team_id || ''}
-                  onChange={e => handleChange('owner_team_id', e.target.value || undefined)}
-                  placeholder="e.g., ml-platform, data-science"
-                />
-                <InfoText>Leave empty for organization-level budget</InfoText>
-              </FormField>
-            ) : (
-              <FormField
-                label="Team"
-                tooltip="The team this budget belongs to. Defaults to your team."
-                fullWidth
-              >
-                <Input
-                  value={formData.owner_team_id || ''}
-                  onChange={e => handleChange('owner_team_id', e.target.value || undefined)}
-                  placeholder={identity?.team_id || 'e.g., ml-platform'}
-                />
-                <InfoText>
-                  {formData.entity_type === 'team'
-                    ? 'Create a budget for your team or another team in your org'
-                    : 'Leave empty for provider-level budget'}
-                </InfoText>
+                <Select
+                  value={formData.allow_fallback ? 'true' : 'false'}
+                  onChange={e => handleChange('allow_fallback', e.target.value === 'true')}
+                >
+                  <option value="false">No (default)</option>
+                  <option value="true">Yes</option>
+                </Select>
               </FormField>
             )}
           </Row>
         )}
+        {/* Team with parent - only org-admins can override inherited settings */}
+        {formData.entity_type === 'team' && formData.parent_id && isOrgAdmin && (
+          <Row>
+            <FormField
+              label="Isolated"
+              tooltip={`Inherited from parent org.\nNo: Usage counts against both team and org budgets.\nYes: Track usage independently without affecting org totals.\nNote: When Isolated is Yes, Allow Fallback is not available.`}
+              fullWidth
+            >
+              <Select
+                value={formData.isolated ? 'true' : 'false'}
+                onChange={e => {
+                  const isIsolated = e.target.value === 'true';
+                  handleChange('isolated', isIsolated);
+                  // Clear allow_fallback when isolated (they're mutually exclusive)
+                  if (isIsolated) {
+                    handleChange('allow_fallback', false);
+                  }
+                }}
+              >
+                <option value="false">No (default)</option>
+                <option value="true">Yes</option>
+              </Select>
+            </FormField>
+            {!formData.isolated && (
+              <FormField
+                label="Allow Fallback"
+                tooltip={`Inherited from parent org.\nNo: Block requests when this team budget is exhausted.\nYes: Fall back to parent org budget if it has remaining balance.\nNote: Only available when Isolated is No.`}
+                fullWidth
+              >
+                <Select
+                  value={formData.allow_fallback ? 'true' : 'false'}
+                  onChange={e => handleChange('allow_fallback', e.target.value === 'true')}
+                >
+                  <option value="false">No (block when exhausted)</option>
+                  <option value="true">Yes (use org budget)</option>
+                </Select>
+              </FormField>
+            )}
+          </Row>
+        )}
+        <FormField label="Description" fullWidth>
+          <Input
+            value={formData.description || ''}
+            onChange={e => handleChange('description', e.target.value || undefined)}
+            placeholder="Optional description"
+          />
+        </FormField>
       </Form>
     </Modal>
   );

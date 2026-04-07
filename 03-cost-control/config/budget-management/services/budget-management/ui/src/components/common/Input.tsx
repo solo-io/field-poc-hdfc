@@ -1,3 +1,5 @@
+import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import styled from '@emotion/styled';
 import { colors, radius, spacing, fontSize } from '../../styles';
 
@@ -89,7 +91,6 @@ const LabelRow = styled.div`
 `;
 
 const TooltipWrapper = styled.div`
-  position: relative;
   display: inline-flex;
   align-items: center;
 `;
@@ -106,34 +107,30 @@ const TooltipIcon = styled.span`
   font-size: 11px;
   font-weight: 600;
   cursor: help;
-
-  &:hover + div {
-    opacity: 1;
-    visibility: visible;
-  }
 `;
 
-const TooltipContent = styled.div`
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
+const TooltipContent = styled.div<{ $x: number; $y: number; $visible: boolean }>`
+  position: fixed;
+  top: ${({ $y }) => $y}px;
+  left: ${({ $x }) => $x}px;
+  transform: translate(-50%, -100%);
   padding: ${spacing[2]} ${spacing[3]};
-  background: ${colors.foreground};
-  color: ${colors.background};
+  background: var(--color-tooltip-bg);
+  color: var(--color-tooltip-text);
   font-size: ${fontSize.xs};
   line-height: 1.4;
   border-radius: ${radius.md};
-  white-space: normal;
+  white-space: pre-line;
   width: 250px;
   max-width: 300px;
-  opacity: 0;
-  visibility: hidden;
+  opacity: ${({ $visible }) => ($visible ? 1 : 0)};
+  visibility: ${({ $visible }) => ($visible ? 'visible' : 'hidden')};
   transition:
     opacity 0.15s ease,
     visibility 0.15s ease;
-  z-index: 1000;
+  z-index: 10000;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
 
   &::after {
     content: '';
@@ -142,9 +139,47 @@ const TooltipContent = styled.div`
     left: 50%;
     transform: translateX(-50%);
     border: 6px solid transparent;
-    border-top-color: ${colors.foreground};
+    border-top-color: var(--color-tooltip-bg);
   }
 `;
+
+interface TooltipProps {
+  content: string;
+}
+
+function Tooltip({ content }: TooltipProps) {
+  const [visible, setVisible] = useState(false);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const iconRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (visible && iconRef.current) {
+      const rect = iconRef.current.getBoundingClientRect();
+      setPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top - 8,
+      });
+    }
+  }, [visible]);
+
+  return (
+    <TooltipWrapper>
+      <TooltipIcon
+        ref={iconRef}
+        onMouseEnter={() => setVisible(true)}
+        onMouseLeave={() => setVisible(false)}
+      >
+        ?
+      </TooltipIcon>
+      {createPortal(
+        <TooltipContent $x={position.x} $y={position.y} $visible={visible}>
+          {content}
+        </TooltipContent>,
+        document.body
+      )}
+    </TooltipWrapper>
+  );
+}
 
 interface FormFieldProps {
   label: string;
@@ -159,12 +194,7 @@ export function FormField({ label, error, tooltip, children, fullWidth }: FormFi
     <InputWrapper fullWidth={fullWidth}>
       <LabelRow>
         <Label>{label}</Label>
-        {tooltip && (
-          <TooltipWrapper>
-            <TooltipIcon>?</TooltipIcon>
-            <TooltipContent>{tooltip}</TooltipContent>
-          </TooltipWrapper>
-        )}
+        {tooltip && <Tooltip content={tooltip} />}
       </LabelRow>
       {children}
       {error && <InputError>{error}</InputError>}

@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/agentgateway/budget-management/internal/models"
+	"github.com/agentgateway/quota-management/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 var (
-	ErrNotFound          = errors.New("not found")
-	ErrOptimisticLock    = errors.New("optimistic lock failed")
-	ErrDuplicateEntity   = errors.New("duplicate entity")
+	ErrNotFound        = errors.New("not found")
+	ErrOptimisticLock  = errors.New("optimistic lock failed")
+	ErrDuplicateEntity = errors.New("duplicate entity")
 )
 
 // Repository provides database operations.
@@ -28,6 +28,11 @@ func NewRepository(db *DB) *Repository {
 	return &Repository{db: db}
 }
 
+// Ping checks database connectivity.
+func (r *Repository) Ping(ctx context.Context) error {
+	return r.db.Pool.Ping(ctx)
+}
+
 // Model Costs
 
 // ListModelCosts returns all model costs.
@@ -35,7 +40,7 @@ func (r *Repository) ListModelCosts(ctx context.Context) ([]models.ModelCost, er
 	query := `
 		SELECT id, model_id, provider, input_cost_per_million, output_cost_per_million,
 		       cache_read_cost_million, cache_write_cost_million, model_pattern,
-		       effective_date, created_at, updated_at
+		       effective_date, created_at, updated_at, created_by_user_id, created_by_email
 		FROM model_costs
 		ORDER BY provider, model_id
 	`
@@ -52,7 +57,7 @@ func (r *Repository) ListModelCosts(ctx context.Context) ([]models.ModelCost, er
 		err := rows.Scan(
 			&mc.ID, &mc.ModelID, &mc.Provider, &mc.InputCostPerMillion, &mc.OutputCostPerMillion,
 			&mc.CacheReadCostMillion, &mc.CacheWriteCostMillion, &mc.ModelPattern,
-			&mc.EffectiveDate, &mc.CreatedAt, &mc.UpdatedAt,
+			&mc.EffectiveDate, &mc.CreatedAt, &mc.UpdatedAt, &mc.CreatedByUserID, &mc.CreatedByEmail,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan model cost: %w", err)
@@ -68,7 +73,7 @@ func (r *Repository) GetModelCostByID(ctx context.Context, modelID string) (*mod
 	query := `
 		SELECT id, model_id, provider, input_cost_per_million, output_cost_per_million,
 		       cache_read_cost_million, cache_write_cost_million, model_pattern,
-		       effective_date, created_at, updated_at
+		       effective_date, created_at, updated_at, created_by_user_id, created_by_email
 		FROM model_costs
 		WHERE model_id = $1
 	`
@@ -77,7 +82,7 @@ func (r *Repository) GetModelCostByID(ctx context.Context, modelID string) (*mod
 	err := r.db.Pool.QueryRow(ctx, query, modelID).Scan(
 		&mc.ID, &mc.ModelID, &mc.Provider, &mc.InputCostPerMillion, &mc.OutputCostPerMillion,
 		&mc.CacheReadCostMillion, &mc.CacheWriteCostMillion, &mc.ModelPattern,
-		&mc.EffectiveDate, &mc.CreatedAt, &mc.UpdatedAt,
+		&mc.EffectiveDate, &mc.CreatedAt, &mc.UpdatedAt, &mc.CreatedByUserID, &mc.CreatedByEmail,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -101,14 +106,14 @@ func (r *Repository) CreateModelCost(ctx context.Context, mc *models.ModelCost) 
 	query := `
 		INSERT INTO model_costs (id, model_id, provider, input_cost_per_million, output_cost_per_million,
 		                         cache_read_cost_million, cache_write_cost_million, model_pattern,
-		                         effective_date, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                         effective_date, created_at, updated_at, created_by_user_id, created_by_email)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 
 	_, err := r.db.Pool.Exec(ctx, query,
 		mc.ID, mc.ModelID, mc.Provider, mc.InputCostPerMillion, mc.OutputCostPerMillion,
 		mc.CacheReadCostMillion, mc.CacheWriteCostMillion, mc.ModelPattern,
-		mc.EffectiveDate, mc.CreatedAt, mc.UpdatedAt,
+		mc.EffectiveDate, mc.CreatedAt, mc.UpdatedAt, mc.CreatedByUserID, mc.CreatedByEmail,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create model cost: %w", err)
@@ -165,8 +170,9 @@ func (r *Repository) ListBudgets(ctx context.Context) ([]models.BudgetDefinition
 	query := `
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_definitions
 		ORDER BY entity_type, name
 	`
@@ -183,8 +189,9 @@ func (r *Repository) ListBudgets(ctx context.Context) ([]models.BudgetDefinition
 		err := rows.Scan(
 			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-			&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 			&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+			&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan budget: %w", err)
@@ -200,8 +207,9 @@ func (r *Repository) GetBudgetByID(ctx context.Context, id uuid.UUID) (*models.B
 	query := `
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_definitions
 		WHERE id = $1
 	`
@@ -210,8 +218,9 @@ func (r *Repository) GetBudgetByID(ctx context.Context, id uuid.UUID) (*models.B
 	err := r.db.Pool.QueryRow(ctx, query, id).Scan(
 		&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 		&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-		&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+		&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 		&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+		&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -228,8 +237,9 @@ func (r *Repository) GetBudgetByEntity(ctx context.Context, entityType models.En
 	query := `
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_definitions
 		WHERE entity_type = $1 AND name = $2
 	`
@@ -238,8 +248,9 @@ func (r *Repository) GetBudgetByEntity(ctx context.Context, entityType models.En
 	err := r.db.Pool.QueryRow(ctx, query, entityType, entityID).Scan(
 		&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 		&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-		&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+		&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 		&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+		&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -267,18 +278,22 @@ func (r *Repository) CreateBudget(ctx context.Context, b *models.BudgetDefinitio
 	query := `
 		INSERT INTO budget_definitions (id, entity_type, name, match_expression, budget_amount_usd,
 		                                 period, custom_period_seconds, warning_threshold_pct,
-		                                 parent_id, isolated, allow_fallback, enabled, current_period_start,
+		                                 parent_id, isolated, allow_fallback, enabled, disabled_by_user_id,
+		                                 disabled_by_email, disabled_by_is_org, disabled_at, current_period_start,
 		                                 current_usage_usd, pending_usage_usd, version, description,
-		                                 created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		                                 created_at, updated_at, owner_org_id, owner_team_id,
+		                                 approval_status, created_by_user_id, created_by_email, rejection_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
 	`
 
 	_, err := r.db.Pool.Exec(ctx, query,
 		b.ID, b.EntityType, b.Name, b.MatchExpression, b.BudgetAmountUSD,
 		b.Period, b.CustomPeriodSeconds, b.WarningThresholdPct,
-		b.ParentID, b.Isolated, b.AllowFallback, b.Enabled, b.CurrentPeriodStart,
+		b.ParentID, b.Isolated, b.AllowFallback, b.Enabled, b.DisabledByUserID,
+		b.DisabledByEmail, b.DisabledByIsOrg, b.DisabledAt, b.CurrentPeriodStart,
 		b.CurrentUsageUSD, b.PendingUsageUSD, b.Version, b.Description,
-		b.CreatedAt, b.UpdatedAt,
+		b.CreatedAt, b.UpdatedAt, b.OwnerOrgID, b.OwnerTeamID,
+		b.ApprovalStatus, b.CreatedByUserID, b.CreatedByEmail, b.RejectionCount,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create budget: %w", err)
@@ -294,15 +309,17 @@ func (r *Repository) UpdateBudget(ctx context.Context, b *models.BudgetDefinitio
 		SET match_expression = $2, budget_amount_usd = $3, period = $4,
 		    custom_period_seconds = $5, warning_threshold_pct = $6,
 		    parent_id = $7, isolated = $8, allow_fallback = $9,
-		    enabled = $10, description = $11, owner_org_id = $12,
-		    owner_team_id = $13, version = version + 1
-		WHERE id = $1 AND version = $14
+		    enabled = $10, disabled_by_user_id = $11, disabled_by_email = $12,
+		    disabled_by_is_org = $13, disabled_at = $14, description = $15, owner_org_id = $16,
+		    owner_team_id = $17, version = version + 1
+		WHERE id = $1 AND version = $18
 	`
 
 	result, err := r.db.Pool.Exec(ctx, query,
 		b.ID, b.MatchExpression, b.BudgetAmountUSD, b.Period,
 		b.CustomPeriodSeconds, b.WarningThresholdPct,
-		b.ParentID, b.Isolated, b.AllowFallback, b.Enabled, b.Description,
+		b.ParentID, b.Isolated, b.AllowFallback, b.Enabled, b.DisabledByUserID,
+		b.DisabledByEmail, b.DisabledByIsOrg, b.DisabledAt, b.Description,
 		b.OwnerOrgID, b.OwnerTeamID, b.Version,
 	)
 	if err != nil {
@@ -434,8 +451,9 @@ func (r *Repository) GetBudgetsWithParent(ctx context.Context, id uuid.UUID) ([]
 		WITH RECURSIVE budget_hierarchy AS (
 			SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 			       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-			       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-			       version, description, created_at, updated_at, owner_org_id, owner_team_id, 0 as depth
+			       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+			       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+			       approval_status, created_by_user_id, created_by_email, rejection_count, 0 as depth
 			FROM budget_definitions
 			WHERE id = $1
 
@@ -443,15 +461,17 @@ func (r *Repository) GetBudgetsWithParent(ctx context.Context, id uuid.UUID) ([]
 
 			SELECT bd.id, bd.entity_type, bd.name, bd.match_expression, bd.budget_amount_usd, bd.period,
 			       bd.custom_period_seconds, bd.warning_threshold_pct, bd.parent_id, bd.isolated,
-			       bd.allow_fallback, bd.enabled, bd.current_period_start, bd.current_usage_usd, bd.pending_usage_usd,
-			       bd.version, bd.description, bd.created_at, bd.updated_at, bd.owner_org_id, bd.owner_team_id, bh.depth + 1
+			       bd.allow_fallback, bd.enabled, bd.disabled_by_user_id, bd.disabled_by_email, bd.disabled_by_is_org, bd.disabled_at, bd.current_period_start, bd.current_usage_usd, bd.pending_usage_usd,
+			       bd.version, bd.description, bd.created_at, bd.updated_at, bd.owner_org_id, bd.owner_team_id,
+			       bd.approval_status, bd.created_by_user_id, bd.created_by_email, bd.rejection_count, bh.depth + 1
 			FROM budget_definitions bd
 			INNER JOIN budget_hierarchy bh ON bd.id = bh.parent_id
 		)
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_hierarchy
 		ORDER BY depth
 	`
@@ -468,8 +488,9 @@ func (r *Repository) GetBudgetsWithParent(ctx context.Context, id uuid.UUID) ([]
 		err := rows.Scan(
 			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-			&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 			&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+			&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan budget: %w", err)
@@ -514,11 +535,14 @@ func (r *Repository) CreateReservation(ctx context.Context, res *models.RequestR
 }
 
 // GetReservationByRequestID returns a reservation by request ID.
+// Returns the first created reservation (most specific/child budget).
 func (r *Repository) GetReservationByRequestID(ctx context.Context, requestID string) (*models.RequestReservation, error) {
 	query := `
 		SELECT id, budget_id, request_id, estimated_cost_usd, expires_at, created_at
 		FROM request_reservations
 		WHERE request_id = $1
+		ORDER BY created_at ASC
+		LIMIT 1
 	`
 
 	var res models.RequestReservation
@@ -675,8 +699,9 @@ func (r *Repository) GetBudgetForUpdate(ctx context.Context, tx pgx.Tx, id uuid.
 	query := `
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_definitions
 		WHERE id = $1
 		FOR UPDATE
@@ -686,8 +711,9 @@ func (r *Repository) GetBudgetForUpdate(ctx context.Context, tx pgx.Tx, id uuid.
 	err := tx.QueryRow(ctx, query, id).Scan(
 		&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 		&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-		&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+		&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 		&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+		&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -714,10 +740,11 @@ func (r *Repository) GetEnabledBudgets(ctx context.Context) ([]models.BudgetDefi
 	query := `
 		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
 		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
-		       allow_fallback, enabled, current_period_start, current_usage_usd, pending_usage_usd,
-		       version, description, created_at, updated_at, owner_org_id, owner_team_id
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
 		FROM budget_definitions
-		WHERE enabled = true
+		WHERE enabled = true AND approval_status = 'approved'
 		ORDER BY entity_type, name
 	`
 
@@ -733,8 +760,9 @@ func (r *Repository) GetEnabledBudgets(ctx context.Context) ([]models.BudgetDefi
 		err := rows.Scan(
 			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
 			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
-			&b.AllowFallback, &b.Enabled, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
 			&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+			&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan budget: %w", err)
@@ -787,6 +815,82 @@ func (r *Repository) DeleteReservationInTx(ctx context.Context, tx pgx.Tx, reque
 	return nil
 }
 
+// GetEnabledBudgetsForUpdate returns enabled budgets with row locks for atomic check-and-reserve.
+// This prevents race conditions when multiple ext-proc pods check the same budget concurrently.
+func (r *Repository) GetEnabledBudgetsForUpdate(ctx context.Context, tx pgx.Tx) ([]models.BudgetDefinition, error) {
+	query := `
+		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
+		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
+		FROM budget_definitions
+		WHERE enabled = true AND approval_status = 'approved'
+		ORDER BY entity_type, name
+		FOR UPDATE
+	`
+
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query enabled budgets for update: %w", err)
+	}
+	defer rows.Close()
+
+	var budgets []models.BudgetDefinition
+	for rows.Next() {
+		var b models.BudgetDefinition
+		err := rows.Scan(
+			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
+			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+			&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+			&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan budget: %w", err)
+		}
+		budgets = append(budgets, b)
+	}
+
+	return budgets, nil
+}
+
+// IncrementPendingUsageInTx increments pending usage within a transaction.
+func (r *Repository) IncrementPendingUsageInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, costUSD float64) error {
+	query := `
+		UPDATE budget_definitions
+		SET pending_usage_usd = pending_usage_usd + $2
+		WHERE id = $1
+	`
+
+	_, err := tx.Exec(ctx, query, id, costUSD)
+	if err != nil {
+		return fmt.Errorf("failed to increment pending usage: %w", err)
+	}
+
+	return nil
+}
+
+// CreateReservationInTx creates a reservation within a transaction.
+func (r *Repository) CreateReservationInTx(ctx context.Context, tx pgx.Tx, res *models.RequestReservation) error {
+	res.ID = uuid.New()
+	res.CreatedAt = time.Now()
+
+	query := `
+		INSERT INTO request_reservations (id, budget_id, request_id, estimated_cost_usd, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+
+	_, err := tx.Exec(ctx, query,
+		res.ID, res.BudgetID, res.RequestID, res.EstimatedCostUSD, res.ExpiresAt, res.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create reservation in tx: %w", err)
+	}
+
+	return nil
+}
+
 // CreateUsageRecordInTx creates a usage record within a transaction.
 func (r *Repository) CreateUsageRecordInTx(ctx context.Context, tx pgx.Tx, ur *models.UsageRecord) error {
 	ur.ID = uuid.New()
@@ -805,6 +909,384 @@ func (r *Repository) CreateUsageRecordInTx(ctx context.Context, tx pgx.Tx, ur *m
 	}
 
 	return nil
+}
+
+// BudgetListFilter holds RBAC filter params for paginated budget listing.
+type BudgetListFilter struct {
+	OrgID       string
+	TeamID      string
+	IsOrg       bool
+	EnabledOnly bool
+}
+
+// ModelCostFilter holds optional filter params for listing model costs.
+type ModelCostFilter struct {
+	Provider string
+	SortBy   string // "input_cost" | "output_cost" | "both"
+	SortDir  string // "asc" | "desc"
+}
+
+// ListBudgetsPaginated returns approved budgets with pagination and RBAC filtering.
+func (r *Repository) ListBudgetsPaginated(ctx context.Context, filter BudgetListFilter, offset, limit int) ([]models.BudgetDefinition, int, error) {
+	where := "WHERE approval_status = 'approved'"
+	args := []interface{}{}
+	argIdx := 1
+
+	if filter.OrgID != "" {
+		if filter.IsOrg {
+			// Org admins see all budgets in their org + unowned budgets
+			where += fmt.Sprintf(" AND (owner_org_id = $%d OR (owner_org_id IS NULL AND owner_team_id IS NULL))", argIdx)
+			args = append(args, filter.OrgID)
+			argIdx++
+		} else if filter.TeamID != "" {
+			// Team members see only: their team's budgets + unowned budgets
+			where += fmt.Sprintf(" AND (owner_team_id = $%d OR (owner_org_id IS NULL AND owner_team_id IS NULL))", argIdx)
+			args = append(args, filter.TeamID)
+			argIdx++
+		}
+	} else {
+		// Unauthenticated users see nothing
+		where += " AND 1=0"
+	}
+
+	// Optional filter for enabled-only (for "At a Glance" counts)
+	if filter.EnabledOnly {
+		where += " AND enabled = true"
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM budget_definitions %s", where)
+	var totalCount int
+	if err := r.db.Pool.QueryRow(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count budgets: %w", err)
+	}
+
+	dataQuery := fmt.Sprintf(`
+		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
+		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start, current_usage_usd, pending_usage_usd,
+		       version, description, created_at, updated_at, owner_org_id, owner_team_id,
+		       approval_status, created_by_user_id, created_by_email, rejection_count
+		FROM budget_definitions %s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d
+	`, where, argIdx, argIdx+1)
+
+	dataArgs := append(args, limit, offset)
+	rows, err := r.db.Pool.Query(ctx, dataQuery, dataArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query budgets: %w", err)
+	}
+	defer rows.Close()
+
+	var budgets []models.BudgetDefinition
+	for rows.Next() {
+		var b models.BudgetDefinition
+		err := rows.Scan(
+			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
+			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart, &b.CurrentUsageUSD, &b.PendingUsageUSD,
+			&b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt, &b.OwnerOrgID, &b.OwnerTeamID,
+			&b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan budget: %w", err)
+		}
+		budgets = append(budgets, b)
+	}
+
+	return budgets, totalCount, nil
+}
+
+// ParentBudgetCandidate is a minimal representation of an org budget for parent selection.
+type ParentBudgetCandidate struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// ListParentCandidates returns org-level budgets that can be selected as parents.
+// Only returns approved and enabled org budgets from the specified organization.
+// Returns minimal data (id, name) for dropdown selection.
+func (r *Repository) ListParentCandidates(ctx context.Context, orgID string) ([]ParentBudgetCandidate, error) {
+	if orgID == "" {
+		return []ParentBudgetCandidate{}, nil
+	}
+
+	query := `
+		SELECT id, name
+		FROM budget_definitions
+		WHERE approval_status = 'approved'
+		  AND enabled = true
+		  AND entity_type = 'org'
+		  AND owner_org_id = $1
+		  AND owner_team_id IS NULL
+		ORDER BY name
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query parent candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []ParentBudgetCandidate
+	for rows.Next() {
+		var c ParentBudgetCandidate
+		if err := rows.Scan(&c.ID, &c.Name); err != nil {
+			return nil, fmt.Errorf("failed to scan parent candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+
+	if candidates == nil {
+		candidates = []ParentBudgetCandidate{}
+	}
+	return candidates, nil
+}
+
+// ListModelCostsPaginated returns model costs with optional filtering and pagination.
+func (r *Repository) ListModelCostsPaginated(ctx context.Context, filter ModelCostFilter, offset, limit int) ([]models.ModelCost, int, error) {
+	where := "WHERE 1=1"
+	args := []interface{}{}
+	argIdx := 1
+
+	if filter.Provider != "" {
+		where += fmt.Sprintf(" AND provider = $%d", argIdx)
+		args = append(args, filter.Provider)
+		argIdx++
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM model_costs %s", where)
+	var totalCount int
+	if err := r.db.Pool.QueryRow(ctx, countQuery, args...).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count model costs: %w", err)
+	}
+
+	dir := "ASC"
+	if filter.SortDir == "desc" {
+		dir = "DESC"
+	}
+
+	orderBy := "created_at DESC"
+	switch filter.SortBy {
+	case "input_cost":
+		orderBy = fmt.Sprintf("input_cost_per_million %s", dir)
+	case "output_cost":
+		orderBy = fmt.Sprintf("output_cost_per_million %s", dir)
+	case "both":
+		orderBy = fmt.Sprintf("input_cost_per_million %s, output_cost_per_million %s", dir, dir)
+	}
+
+	dataQuery := fmt.Sprintf(`
+		SELECT id, model_id, provider, input_cost_per_million, output_cost_per_million,
+		       cache_read_cost_million, cache_write_cost_million, model_pattern,
+		       effective_date, created_at, updated_at, created_by_user_id, created_by_email
+		FROM model_costs
+		%s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, where, orderBy, argIdx, argIdx+1)
+
+	dataArgs := append(args, limit, offset)
+	rows, err := r.db.Pool.Query(ctx, dataQuery, dataArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query model costs: %w", err)
+	}
+	defer rows.Close()
+
+	var costs []models.ModelCost
+	for rows.Next() {
+		var mc models.ModelCost
+		err := rows.Scan(
+			&mc.ID, &mc.ModelID, &mc.Provider, &mc.InputCostPerMillion, &mc.OutputCostPerMillion,
+			&mc.CacheReadCostMillion, &mc.CacheWriteCostMillion, &mc.ModelPattern,
+			&mc.EffectiveDate, &mc.CreatedAt, &mc.UpdatedAt, &mc.CreatedByUserID, &mc.CreatedByEmail,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan model cost: %w", err)
+		}
+		costs = append(costs, mc)
+	}
+
+	return costs, totalCount, nil
+}
+
+// ListDistinctProviders returns all distinct provider names sorted alphabetically.
+// Returns an empty slice (not an error) when the table has no rows.
+func (r *Repository) ListDistinctProviders(ctx context.Context) ([]string, error) {
+	query := `SELECT DISTINCT provider FROM model_costs ORDER BY provider`
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query distinct providers: %w", err)
+	}
+	defer rows.Close()
+
+	var providers []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("failed to scan provider: %w", err)
+		}
+		providers = append(providers, p)
+	}
+
+	if providers == nil {
+		providers = []string{}
+	}
+	return providers, nil
+}
+
+func (r *Repository) GetUsageByBudgetIDPaginated(ctx context.Context, budgetID uuid.UUID, offset, limit int) ([]models.UsageRecord, int, error) {
+	countQuery := `SELECT COUNT(*) FROM usage_records WHERE budget_id = $1`
+	var totalCount int
+	if err := r.db.Pool.QueryRow(ctx, countQuery, budgetID).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count usage records: %w", err)
+	}
+
+	query := `
+		SELECT id, budget_id, request_id, model_id, input_tokens, output_tokens, cost_usd, parent_charged, created_at
+		FROM usage_records
+		WHERE budget_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, budgetID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query usage records: %w", err)
+	}
+	defer rows.Close()
+
+	var records []models.UsageRecord
+	for rows.Next() {
+		var ur models.UsageRecord
+		err := rows.Scan(
+			&ur.ID, &ur.BudgetID, &ur.RequestID, &ur.ModelID, &ur.InputTokens, &ur.OutputTokens, &ur.CostUSD, &ur.ParentCharged, &ur.CreatedAt,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan usage record: %w", err)
+		}
+		records = append(records, ur)
+	}
+
+	return records, totalCount, nil
+}
+
+// GetChildBudgets returns all budgets with the given parent_id
+func (r *Repository) GetChildBudgets(ctx context.Context, parentID uuid.UUID) ([]models.BudgetDefinition, error) {
+	query := `
+		SELECT id, entity_type, name, match_expression, budget_amount_usd, period,
+		       custom_period_seconds, warning_threshold_pct, parent_id, isolated,
+		       allow_fallback, enabled, disabled_by_user_id, disabled_by_email, disabled_by_is_org, disabled_at, current_period_start,
+		       current_usage_usd, pending_usage_usd, version, description, created_at, updated_at,
+		       owner_org_id, owner_team_id, approval_status, created_by_user_id, created_by_email, rejection_count
+		FROM budget_definitions
+		WHERE parent_id = $1
+	`
+	rows, err := r.db.Pool.Query(ctx, query, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var budgets []models.BudgetDefinition
+	for rows.Next() {
+		var b models.BudgetDefinition
+		err := rows.Scan(
+			&b.ID, &b.EntityType, &b.Name, &b.MatchExpression, &b.BudgetAmountUSD, &b.Period,
+			&b.CustomPeriodSeconds, &b.WarningThresholdPct, &b.ParentID, &b.Isolated,
+			&b.AllowFallback, &b.Enabled, &b.DisabledByUserID, &b.DisabledByEmail, &b.DisabledByIsOrg, &b.DisabledAt, &b.CurrentPeriodStart,
+			&b.CurrentUsageUSD, &b.PendingUsageUSD, &b.Version, &b.Description, &b.CreatedAt, &b.UpdatedAt,
+			&b.OwnerOrgID, &b.OwnerTeamID, &b.ApprovalStatus, &b.CreatedByUserID, &b.CreatedByEmail, &b.RejectionCount,
+		)
+		if err != nil {
+			return nil, err
+		}
+		budgets = append(budgets, b)
+	}
+
+	return budgets, rows.Err()
+}
+
+// GetAllDescendants returns all descendant budget IDs (children, grandchildren, etc.) using a recursive CTE.
+// Returns IDs in order from deepest descendants first (safe for deletion).
+func (r *Repository) GetAllDescendants(ctx context.Context, parentID uuid.UUID) ([]uuid.UUID, error) {
+	query := `
+		WITH RECURSIVE descendants AS (
+			SELECT id, 1 as depth
+			FROM budget_definitions
+			WHERE parent_id = $1
+
+			UNION ALL
+
+			SELECT bd.id, d.depth + 1
+			FROM budget_definitions bd
+			INNER JOIN descendants d ON bd.parent_id = d.id
+		)
+		SELECT id FROM descendants ORDER BY depth DESC
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query descendants: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan descendant id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, rows.Err()
+}
+
+// DeleteBudgetCascade deletes a budget and all its descendants in a single transaction.
+// Returns the count of deleted budgets (including the parent).
+func (r *Repository) DeleteBudgetCascade(ctx context.Context, id uuid.UUID) (int, error) {
+	// Get all descendants first (deepest first)
+	descendants, err := r.GetAllDescendants(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+
+	// Begin transaction
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	// Delete all descendants (deepest first to avoid FK violations)
+	for _, descID := range descendants {
+		_, err = tx.Exec(ctx, `DELETE FROM budget_definitions WHERE id = $1`, descID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to delete descendant %s: %w", descID, err)
+		}
+	}
+
+	// Delete the parent
+	result, err := tx.Exec(ctx, `DELETE FROM budget_definitions WHERE id = $1`, id)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete budget: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return 0, ErrNotFound
+	}
+
+	// Commit transaction
+	if err = tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return len(descendants) + 1, nil
 }
 
 // Avoid unused import error

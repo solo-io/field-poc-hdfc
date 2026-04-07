@@ -44,6 +44,7 @@ export const TableHeader = styled.th<{ align?: 'left' | 'center' | 'right' }>`
   text-transform: uppercase;
   letter-spacing: 0.05em;
   white-space: nowrap;
+  background: inherit;
 `;
 
 export const TableCell = styled.td<{ align?: 'left' | 'center' | 'right' }>`

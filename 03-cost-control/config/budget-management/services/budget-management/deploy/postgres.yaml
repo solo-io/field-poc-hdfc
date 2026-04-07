@@ -2,29 +2,33 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: budget-management-postgres-init
+  name: quota-management-postgres-init
   namespace: agentgateway-system
   labels:
-    app: budget-management-postgres
+    app: quota-management-postgres
     app.kubernetes.io/managed-by: agentgateway-demo
 data:
   init.sql: |
-    -- Budget Limiter Schema
-    -- Version: 001_initial
+    -- Budget Management Schema
 
     -- Enable UUID extension
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-    -- Budget period enum
+    -- Enums
     DO $$ BEGIN
         CREATE TYPE budget_period AS ENUM ('hourly', 'daily', 'weekly', 'monthly', 'custom');
     EXCEPTION
         WHEN duplicate_object THEN null;
     END $$;
 
-    -- Entity type enum
     DO $$ BEGIN
         CREATE TYPE entity_type AS ENUM ('provider', 'org', 'team');
+    EXCEPTION
+        WHEN duplicate_object THEN null;
+    END $$;
+
+    DO $$ BEGIN
+        CREATE TYPE approval_status AS ENUM ('pending', 'approved', 'rejected', 'closed');
     EXCEPTION
         WHEN duplicate_object THEN null;
     END $$;
@@ -40,11 +44,12 @@ data:
         cache_write_cost_million DECIMAL(20, 10),
         model_pattern           VARCHAR(255),
         effective_date          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        created_by_user_id      VARCHAR(255),
+        created_by_email        VARCHAR(255),
         created_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
 
-    -- Create indexes
     CREATE INDEX IF NOT EXISTS idx_model_costs_model_id ON model_costs(model_id);
     CREATE INDEX IF NOT EXISTS idx_model_costs_provider ON model_costs(provider);
 
@@ -59,9 +64,13 @@ data:
         custom_period_seconds   INTEGER,
         warning_threshold_pct   INTEGER NOT NULL DEFAULT 80,
         parent_id               UUID REFERENCES budget_definitions(id),
-        isolated                BOOLEAN NOT NULL DEFAULT true,
+        isolated                BOOLEAN NOT NULL DEFAULT false,
         allow_fallback          BOOLEAN NOT NULL DEFAULT false,
         enabled                 BOOLEAN NOT NULL DEFAULT true,
+        disabled_by_user_id     VARCHAR(255),
+        disabled_by_email       VARCHAR(255),
+        disabled_by_is_org      BOOLEAN DEFAULT FALSE,
+        disabled_at             TIMESTAMPTZ,
         current_period_start    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         current_usage_usd       DECIMAL(20, 10) NOT NULL DEFAULT 0,
         pending_usage_usd       DECIMAL(20, 10) NOT NULL DEFAULT 0,
@@ -69,6 +78,10 @@ data:
         description             TEXT,
         owner_org_id            VARCHAR(255),
         owner_team_id           VARCHAR(255),
+        approval_status         approval_status NOT NULL DEFAULT 'approved',
+        created_by_user_id      VARCHAR(255),
+        created_by_email        VARCHAR(255),
+        rejection_count         INT NOT NULL DEFAULT 0,
         created_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         updated_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
         CONSTRAINT unique_entity UNIQUE (entity_type, name)
@@ -112,6 +125,41 @@ data:
     CREATE INDEX IF NOT EXISTS idx_request_reservations_expires_at ON request_reservations(expires_at);
     CREATE INDEX IF NOT EXISTS idx_request_reservations_request_id ON request_reservations(request_id);
 
+    -- Budget approvals table
+    CREATE TABLE IF NOT EXISTS budget_approvals (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        budget_id      UUID NOT NULL REFERENCES budget_definitions(id) ON DELETE CASCADE,
+        attempt_number INT NOT NULL DEFAULT 1,
+        action         VARCHAR(20) NOT NULL,
+        actor_user_id  VARCHAR(255) NOT NULL,
+        actor_email    VARCHAR(255),
+        reason         TEXT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_approvals_budget ON budget_approvals(budget_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_approvals_pending ON budget_approvals(action) WHERE action = 'submitted';
+
+    -- Audit log table
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        entity_type   VARCHAR(50) NOT NULL,
+        entity_id     VARCHAR(255) NOT NULL,
+        action        VARCHAR(50) NOT NULL,
+        actor_user_id VARCHAR(255),
+        actor_email   VARCHAR(255),
+        org_id        VARCHAR(255),
+        team_id       VARCHAR(255),
+        metadata      JSONB,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_user_id, created_at DESC);
+
     -- Function to update updated_at timestamp
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $$
@@ -121,7 +169,6 @@ data:
     END;
     $$ language 'plpgsql';
 
-    -- Triggers for updated_at (drop first to avoid errors on re-run)
     DROP TRIGGER IF EXISTS update_model_costs_updated_at ON model_costs;
     CREATE TRIGGER update_model_costs_updated_at
         BEFORE UPDATE ON model_costs
@@ -134,7 +181,13 @@ data:
         FOR EACH ROW
         EXECUTE FUNCTION update_updated_at_column();
 
-    -- Insert default model costs (ignore conflicts)
+    DROP TRIGGER IF EXISTS update_budget_approvals_updated_at ON budget_approvals;
+    CREATE TRIGGER update_budget_approvals_updated_at
+        BEFORE UPDATE ON budget_approvals
+        FOR EACH ROW
+        EXECUTE FUNCTION update_updated_at_column();
+
+    -- Default model costs
     INSERT INTO model_costs (model_id, provider, input_cost_per_million, output_cost_per_million) VALUES
         -- OpenAI models
         ('gpt-4.1', 'openai', 2.00, 8.00),
@@ -182,10 +235,10 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: budget-management-postgres-secret
+  name: quota-management-postgres-secret
   namespace: agentgateway-system
   labels:
-    app: budget-management-postgres
+    app: quota-management-postgres
     app.kubernetes.io/managed-by: agentgateway-demo
 type: Opaque
 stringData:
@@ -196,10 +249,10 @@ stringData:
 apiVersion: v1
 kind: Service
 metadata:
-  name: budget-management-postgres
+  name: quota-management-postgres
   namespace: agentgateway-system
   labels:
-    app: budget-management-postgres
+    app: quota-management-postgres
     app.kubernetes.io/managed-by: agentgateway-demo
 spec:
   type: ClusterIP
@@ -209,26 +262,26 @@ spec:
       protocol: TCP
       name: postgres
   selector:
-    app: budget-management-postgres
+    app: quota-management-postgres
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: budget-management-postgres
+  name: quota-management-postgres
   namespace: agentgateway-system
   labels:
-    app: budget-management-postgres
+    app: quota-management-postgres
     app.kubernetes.io/managed-by: agentgateway-demo
 spec:
-  serviceName: budget-management-postgres
+  serviceName: quota-management-postgres
   replicas: 1
   selector:
     matchLabels:
-      app: budget-management-postgres
+      app: quota-management-postgres
   template:
     metadata:
       labels:
-        app: budget-management-postgres
+        app: quota-management-postgres
     spec:
       containers:
         - name: postgres
@@ -238,12 +291,26 @@ spec:
               name: postgres
           envFrom:
             - secretRef:
-                name: budget-management-postgres-secret
+                name: quota-management-postgres-secret
+          # -- Uncomment to enable PostgreSQL TLS --
+          # args:
+          #   - -c
+          #   - ssl=on
+          #   - -c
+          #   - ssl_cert_file=/etc/postgres-tls/tls.crt
+          #   - -c
+          #   - ssl_key_file=/etc/postgres-tls/tls.key
+          #   - -c
+          #   - ssl_ca_file=/etc/postgres-tls/ca.crt
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
             - name: init-scripts
               mountPath: /docker-entrypoint-initdb.d
+            # -- Uncomment to enable PostgreSQL TLS --
+            # - name: postgres-tls
+            #   mountPath: /etc/postgres-tls
+            #   readOnly: true
           resources:
             requests:
               memory: '256Mi'
@@ -274,7 +341,12 @@ spec:
       volumes:
         - name: init-scripts
           configMap:
-            name: budget-management-postgres-init
+            name: quota-management-postgres-init
+        # -- Uncomment to enable PostgreSQL TLS --
+        # - name: postgres-tls
+        #   secret:
+        #     secretName: quota-management-postgres-tls
+        #     defaultMode: 0600
   volumeClaimTemplates:
     - metadata:
         name: postgres-data

@@ -13,7 +13,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 const variantStyles = {
   primary: {
     background: colors.primary,
-    color: colors.foreground,
+    color: '#FFFFFF',
     border: 'none',
     hover: colors.primaryHover,
     active: colors.primaryActive,
@@ -27,7 +27,7 @@ const variantStyles = {
   },
   danger: {
     background: colors.error,
-    color: colors.foreground,
+    color: '#FFFFFF',
     border: 'none',
     hover: '#DC2626',
     active: '#B91C1C',

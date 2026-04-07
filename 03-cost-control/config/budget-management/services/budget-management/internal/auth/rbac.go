@@ -104,3 +104,17 @@ func GetOwnershipFromIdentity(identity *Identity) (orgID, teamID string) {
 	// Team members additionally have team_id
 	return identity.OrgID, identity.TeamID
 }
+
+func CanApproveOrReject(identity *Identity, budgetOrgID string) bool {
+	if identity == nil {
+		return false
+	}
+	return identity.IsOrg && identity.OrgID != "" && identity.OrgID == budgetOrgID
+}
+
+func CanResubmit(identity *Identity, createdByUserID string) bool {
+	if identity == nil {
+		return false
+	}
+	return identity.Subject != "" && identity.Subject == createdByUserID
+}

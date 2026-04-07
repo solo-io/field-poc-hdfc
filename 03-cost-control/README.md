@@ -1,6 +1,6 @@
-# Cost Control with Budget Management
+# Cost Control with Quota Management
 
-This demo showcases Agent Gateway's cost control capabilities using a budget management service that enforces spending limits on LLM requests.
+This demo showcases Agent Gateway's cost control capabilities using a quota management service that enforces spending budgets and rate limits on LLM requests in real time.
 
 ## Overview
 
@@ -10,23 +10,81 @@ This demo showcases Agent Gateway's cost control capabilities using a budget man
 
 ![](./images/overview.png)
 
+```mermaid
+graph LR
+    client([AI Client])
+    agw[agentgateway\nkgateway + Envoy]
+    llm([LLM Provider])
+    ui[Management UI]
+
+    subgraph quota [Quota Management]
+        budget[extproc-budget\ngRPC :4444]
+        ratelimit[extproc-ratelimit\ngRPC :4444]
+        api[Management API\nHTTP :8080]
+        db[(PostgreSQL)]
+    end
+
+    client --> agw
+    agw -->|ext-proc gRPC| budget
+    agw -->|ext-proc gRPC| ratelimit
+    agw --> llm
+    budget --> db
+    ratelimit --> db
+    api --> db
+    ui --> api
+```
+
 ## Components
 
 | Component | Description |
 |-----------|-------------|
-| **Agent Gateway** | Routes LLM requests and applies ext-proc for cost enforcement |
-| **Budget Management** | ext-proc service that calculates costs and enforces budgets |
-| **PostgreSQL** | Stores budget definitions, usage records, and model pricing |
+| **Agent Gateway** | Routes LLM requests and applies ext-proc for cost and rate limit enforcement |
+| **extproc-budget** | ext-proc service that calculates costs and enforces spending budgets |
+| **extproc-ratelimit** | ext-proc service that injects rate limit metadata for token/request quotas |
+| **Management API** | REST API for configuring budgets, model costs, rate limits, and approvals |
+| **PostgreSQL** | Stores budget definitions, usage records, model pricing, and audit logs |
 | **Keycloak** | OIDC provider for UI authentication |
-| **Budget UI** | Web interface for managing budgets and viewing usage |
+| **Management UI** | Web interface for managing budgets, rate limits, approvals, and viewing usage |
 
 ## Features Demonstrated
 
-- **Real-time cost tracking** - Token usage converted to USD costs
-- **Budget enforcement** - Requests blocked when budget is exhausted
-- **Hierarchical budgets** - Org-level and team-level budget limits
-- **Warning thresholds** - Alerts before budget exhaustion (default: 80%)
-- **OIDC-protected UI** - Secure access to budget management console
+### Budget Enforcement
+
+- **Hierarchical budgets** with parent-child relationships and configurable fallback behavior
+- **CEL expression matching** to target budgets by org, team, model, JWT claims, or any request attribute
+- **Dual-phase enforcement**: pre-flight reservation before upstream call, actual charge after response
+- **Period resets**: automatic hourly, daily, weekly, monthly, or custom reset cycles
+- **Soft disable**: org admins can disable budgets without deleting history
+- **Approval workflow**: budgets require org-admin approval before becoming active
+
+### Rate Limit Orchestration
+
+- **Per-team, per-model allocations** with token and request limits
+- **Model pattern matching** (e.g., `gpt-4*`, `claude-*`) for wildcard allocations
+- **Burst allowance** configurable per allocation
+- **Dynamic metadata injection** into Envoy's rate limiter via ext-proc headers
+- **Approval workflow** matching the budget workflow
+
+### Cost Tracking
+
+- **Real-time cost calculation** using per-model input/output token pricing
+- **35+ pre-loaded model costs** covering OpenAI, Anthropic, Google, Mistral, AWS
+- **Usage history** per budget with token counts and USD charges
+- **Prometheus metrics** for cost trends, utilization, denials, and latency
+
+### Management UI
+
+- **Budget dashboard**: create, edit, view usage, reset periods
+- **Model cost catalog**: manage token pricing per model
+- **Rate limit allocations**: configure per-team limits
+- **Approval queue**: org admins approve or reject pending budgets and allocations
+- **Audit log**: full compliance trail of all actions
+
+### Access Control
+
+- **JWT-based identity**: org ID, team ID, user ID extracted from token claims
+- **Role-based filtering**: org admins see all org budgets; team members see only their own
+- **Audit trail**: all create/update/approve/reject actions are logged with actor identity
 
 ## Configuration Files
 
@@ -36,98 +94,193 @@ This demo showcases Agent Gateway's cost control capabilities using a budget man
 | `budget-management-deploy.yaml` | Budget management service deployment |
 | `postgresql-deploy.yaml` | PostgreSQL with schema initialization |
 
-## Budget Service Environment Variables
+## How Budget Enforcement Works
 
-The budget management service is configured via the following environment variables:
+```mermaid
+sequenceDiagram
+    participant C as AI Client
+    participant G as agentgateway
+    participant E as extproc-budget
+    participant L as LLM Provider
+    participant D as PostgreSQL
+
+    C->>G: POST /v1/chat/completions
+    G->>E: RequestHeaders (ext-proc phase)
+    E->>D: Load budgets from cache
+    E->>E: Evaluate CEL expressions
+    alt Budget available
+        E->>D: Create request_reservation (estimated cost hold)
+        E-->>G: Continue
+        G->>L: Forward request
+        L-->>G: Response (with token counts)
+        G->>E: ResponseBody (ext-proc phase)
+        E->>D: Charge actual cost, release reservation
+        E->>D: Insert usage_record
+        E-->>G: Continue
+        G-->>C: Response
+    else Budget exceeded
+        E-->>G: ImmediateResponse 429
+        G-->>C: 429 Too Many Requests
+    end
+```
+
+For hierarchical budgets, the child budget is checked first. If the child is exhausted and `allow_fallback=true`, the request falls through to the parent budget.
+
+## Environment Variables
 
 ### Server Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRPC_PORT` | `4444` | gRPC port for ext-proc communication with Agent Gateway |
-| `HTTP_PORT` | `8080` | HTTP port for REST API and UI |
-| `METRICS_PORT` | `9090` | Prometheus metrics endpoint |
-| `DATABASE_URL` | - | PostgreSQL connection string |
-| `LOG_LEVEL` | `info` | Logging level (`debug`, `info`, `warn`, `error`) |
-| `LOG_FORMAT` | `json` | Log format (`json` or `text`) |
+| `DATABASE_URL` | required | PostgreSQL connection string |
+| `GRPC_PORT` | `4444` | ext-proc gRPC server port |
+| `HTTP_PORT` | `8080` | Management API + UI port |
+| `METRICS_PORT` | `9090` | Prometheus metrics port |
+| `LOG_LEVEL` | `info` | Logging level (debug/info/warn/error) |
 
 ### Caching Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_COST_CACHE_TTL` | `60s` | How long to cache model pricing data |
-| `BUDGET_CACHE_TTL` | `10s` | How long to cache budget definitions |
-| `RESERVATION_TTL` | `5m` | How long to hold cost reservations for in-flight requests |
+| `BUDGET_CACHE_TTL` | `30s` | Budget definition cache duration |
+| `MODEL_COST_CACHE_TTL` | `60s` | Model pricing cache duration |
+| `RESERVATION_TTL` | `5m` | Pre-request budget hold duration |
 
 ### Cost Estimation
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEFAULT_ESTIMATION_MULTIPLIER` | `1.0` | Multiplier for estimated costs (use >1.0 for safety margin) |
-| `DEFAULT_ESTIMATED_INPUT_TOKENS` | `100` | Default input tokens when estimation is needed |
-| `DEFAULT_ESTIMATED_OUTPUT_TOKENS` | `100` | Default output tokens when estimation is needed |
+| `DEFAULT_ESTIMATION_MULTIPLIER` | `1.5` | Multiplier applied to pre-request cost estimate |
+| `DEFAULT_ESTIMATED_INPUT_TOKENS` | `1000` | Default input tokens when estimation is needed |
+| `DEFAULT_ESTIMATED_OUTPUT_TOKENS` | `1000` | Default output tokens when estimation is needed |
 
-### Authentication (Optional)
+### Identity Headers
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTH_ENABLED` | `false` | Enable JWT validation for API requests |
+| `ORG_ID_HEADER` | `x-gw-org-id` | Header carrying the organization ID |
+| `TEAM_ID_HEADER` | `x-gw-team-id` | Header carrying the team ID |
+| `USER_ID_HEADER` | `x-user-id` | Header carrying the user ID |
+| `MODEL_HEADER` | `x-gw-llm-model` | Header carrying the LLM model name |
+
+## CEL Expression Examples
+
+Budgets match requests using [Common Expression Language (CEL)](https://cel.dev) expressions:
+
+```cel
+# Match any request
+true
+
+# Match by LLM model
+llm.model == "gpt-4o"
+
+# Match models from a provider
+llm.model.startsWith("claude-")
+
+# Match by org from JWT
+jwt.claims.org_id == "acme-corp"
+
+# Match a specific team on a specific model
+jwt.claims.team_id == "platform-eng" && llm.model == "gpt-4o-mini"
+
+# Match by request header
+request.headers["x-environment"] == "production"
+
+# Match by org ID header (for UI budget definition)
+# Headers are set by gateway JWT transformation before reaching ext-proc
+"x-gw-org-id" in request.headers && request.headers["x-gw-org-id"] == "acme-corp"
+```
+
+## REST API
+
+All management endpoints are served at `HTTP :8080`. The base path is `/api/v1`.
+
+### Budgets
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/budgets` | List budgets (filtered by caller's org/team) |
+| `POST` | `/api/v1/budgets` | Create a new budget |
+| `GET` | `/api/v1/budgets/{id}` | Get a single budget |
+| `PUT` | `/api/v1/budgets/{id}` | Update a budget |
+| `DELETE` | `/api/v1/budgets/{id}` | Soft-delete (disable) a budget |
+| `POST` | `/api/v1/budgets/{id}/reset` | Manually reset current period usage |
+| `GET` | `/api/v1/budgets/{id}/usage` | Get usage history for a budget |
+| `POST` | `/api/v1/validate-cel` | Validate a CEL expression |
+
+### Model Costs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/model-costs` | List all model costs |
+| `POST` | `/api/v1/model-costs` | Add a new model |
+| `GET` | `/api/v1/model-costs/{model_id}` | Get a single model's costs |
+| `PUT` | `/api/v1/model-costs/{model_id}` | Update model pricing |
+| `DELETE` | `/api/v1/model-costs/{model_id}` | Remove a model |
+| `GET` | `/api/v1/model-costs/providers` | List distinct provider names |
+
+### Rate Limit Allocations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/rate-limits` | List all allocations |
+| `POST` | `/api/v1/rate-limits` | Create a new allocation |
+| `GET` | `/api/v1/rate-limits/{id}` | Get a single allocation |
+| `PUT` | `/api/v1/rate-limits/{id}` | Update an allocation |
+| `DELETE` | `/api/v1/rate-limits/{id}` | Remove an allocation |
+
+### Approvals
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/approvals` | List pending approvals |
+| `GET` | `/api/v1/approvals/count` | Count of pending approvals |
+| `GET` | `/api/v1/approvals/history` | Full approval history |
+| `POST` | `/api/v1/approvals/{budget_id}/approve` | Approve a budget |
+| `POST` | `/api/v1/approvals/{budget_id}/reject` | Reject with reason |
+| `POST` | `/api/v1/approvals/{budget_id}/resubmit` | Resubmit rejected budget |
+
+### Audit Log
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/audit` | Query audit log (supports filtering and pagination) |
 
 ## Prometheus Metrics
 
-The budget management service exposes metrics on port `9090` at `/metrics`. These can be scraped by Prometheus for monitoring and alerting.
+The quota management service exposes metrics on port `9090` at `/metrics`.
 
-### Request Metrics
+### Budget Enforcement Metrics
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `budget_management_requests_total` | Counter | `result` | Total requests processed (`allowed` or `denied`) |
+| `budget_management_requests_total` | Counter | `result` | Total requests processed (allowed/denied) |
 | `budget_management_checks_total` | Counter | `entity_type`, `name`, `result` | Budget checks per entity |
 | `budget_management_check_duration_seconds` | Histogram | `entity_type` | Duration of budget check operations |
-
-### Cost & Token Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `budget_management_cost_charged_usd_total` | Counter | `entity_type`, `name`, `model` | Total cost charged in USD |
-| `budget_management_tokens_total` | Counter | `entity_type`, `name`, `model`, `direction` | Tokens processed (`input` or `output`) |
-
-### Budget State Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `budget_management_usage_usd` | Gauge | `entity_type`, `name`, `period` | Current budget usage in USD |
-| `budget_management_remaining_usd` | Gauge | `entity_type`, `name`, `period` | Remaining budget in USD |
-| `budget_management_utilization_pct` | Gauge | `entity_type`, `name`, `period` | Budget utilization percentage |
-
-### Rate Limiting & Fallback Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `budget_management_requests_rate_limited_total` | Counter | `entity_type`, `name` | Requests denied due to budget exhaustion |
-| `budget_management_fallbacks_total` | Counter | `child_*`, `parent_*` | Requests that fell back to parent budget |
-
-### Reservation Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `budget_management_active_reservations` | Gauge | - | Number of active cost reservations |
-| `budget_management_reservations_created_total` | Counter | - | Total reservations created |
-| `budget_management_reservations_expired_total` | Counter | - | Total reservations expired |
-
-### ext-proc Metrics
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
+| `budget_management_cost_charged_usd_total` | Counter | `entity`, `name`, `model` | Total cost charged in USD |
+| `budget_management_tokens_total` | Counter | `entity`, `name`, `model`, `direction` | Tokens processed (input/output) |
+| `budget_management_usage_usd` | Gauge | `entity`, `name`, `period` | Current budget usage in USD |
+| `budget_management_remaining_usd` | Gauge | `entity`, `name`, `period` | Remaining budget in USD |
+| `budget_management_utilization_pct` | Gauge | `entity`, `name`, `period` | Budget utilization percentage |
+| `budget_management_requests_rate_limited_total` | Counter | `entity`, `name` | Requests denied due to budget exhaustion |
+| `budget_management_fallbacks_total` | Counter | `child`, `parent` | Requests that fell back to parent budget |
+| `budget_management_active_reservations` | Gauge | — | Number of active cost reservations |
+| `budget_management_reservations_expired_total` | Counter | — | Total reservations expired |
 | `budget_management_extproc_requests_total` | Counter | `phase`, `status` | ext-proc requests processed |
 | `budget_management_extproc_duration_seconds` | Histogram | `phase` | ext-proc processing duration |
-| `budget_management_periods_reset_total` | Counter | `period` | Budget periods reset |
+
+### Rate Limit Injection Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `quota_ratelimit_injections_total` | Counter | `result` (injected/skipped) | Rate limit metadata injections |
+| `quota_ratelimit_lookup_duration_seconds` | Histogram | — | Allocation lookup duration |
 
 ### Accessing Metrics
 
 ```bash
 # Port-forward the metrics port
-kubectl port-forward -n agentgateway-system svc/budget-management 9090:9090
+kubectl port-forward -n agentgateway-system svc/quota-management 9090:9090
 
 # Fetch metrics
 curl http://localhost:9090/metrics
@@ -198,24 +351,37 @@ curl -X POST http://localhost:8080/openai/v1/chat/completions \
 curl -X POST http://localhost:8080/api/v1/budgets \
   -H "Content-Type: application/json" \
   -d '{
-    "entity_type": "org",
-    "name": "acme-corp",
-    "match_expression": "true",
-    "budget_amount_usd": 10.00,
-    "period": "daily",
-    "warning_threshold_pct": 80
+    "entity_type": "team",
+    "name": "platform-eng-gpt4",
+    "match_expression": "jwt.claims.team_id == '\''platform-eng'\'' && llm.model == '\''gpt-4o'\''",
+    "budget_amount_usd": 100.00,
+    "period": "monthly",
+    "warning_threshold_pct": 80,
+    "parent_id": null,
+    "isolated": false,
+    "allow_fallback": true
   }'
 ```
 
 ## Key Policies
 
-### ext-proc Policy
+### ext-proc Policy (Budget)
 Intercepts all LLM requests and applies budget enforcement:
 ```yaml
 traffic:
   extProc:
     backendRef:
-      name: budget-management
+      name: extproc-budget
+      port: 4444
+```
+
+### ext-proc Policy (Rate Limit)
+Injects rate limit metadata for Envoy's rate limiter:
+```yaml
+traffic:
+  extProc:
+    backendRef:
+      name: extproc-ratelimit
       port: 4444
 ```
 
@@ -227,3 +393,38 @@ traffic:
     authConfigRef:
       name: budget-management-auth
 ```
+
+## Tech Stack
+
+**Backend (Go)**
+- [pgx](https://github.com/jackc/pgx) - PostgreSQL driver
+- [zerolog](https://github.com/rs/zerolog) - Structured logging
+- [cel-go](https://github.com/google/cel-go) - CEL expression evaluation
+- [Prometheus client](https://github.com/prometheus/client_golang) - Metrics
+
+**Frontend (TypeScript)**
+- React 19
+- React Router v7
+- SWR - data fetching with cache
+- Emotion - CSS-in-JS styling
+- Vite + Bun
+
+**Infrastructure**
+- PostgreSQL 16 - state store
+- Envoy External Processor API (gRPC) - gateway integration
+- Prometheus - metrics collection
+- Kubernetes - deployment target
+
+## Pre-Seeded Model Costs
+
+The database migration seeds the following models at first startup:
+
+| Provider | Models |
+|----------|--------|
+| OpenAI | gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini, gpt-3.5-turbo, o1, o1-mini, o3, o3-mini |
+| Anthropic | claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus, claude-3-haiku |
+| Google | gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-pro, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash |
+| Mistral | mistral-large, mistral-medium, mistral-small, mistral-7b |
+| AWS | nova-micro, nova-lite, nova-pro |
+
+Pricing is stored per 1,000,000 tokens. Costs can be updated via the UI or API without requiring a service restart (cache TTL 60s).

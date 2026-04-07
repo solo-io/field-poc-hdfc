@@ -1,4 +1,4 @@
-module github.com/agentgateway/budget-management
+module github.com/agentgateway/quota-management
 
 go 1.25.7
 

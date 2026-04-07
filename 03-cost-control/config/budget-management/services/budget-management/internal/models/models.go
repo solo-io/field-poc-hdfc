@@ -29,17 +29,19 @@ const (
 
 // ModelCost represents the cost configuration for an LLM model.
 type ModelCost struct {
-	ID                    uuid.UUID      `json:"id" db:"id"`
-	ModelID               string         `json:"model_id" db:"model_id"`
-	Provider              string         `json:"provider" db:"provider"`
-	InputCostPerMillion   float64        `json:"input_cost_per_million" db:"input_cost_per_million"`
-	OutputCostPerMillion  float64        `json:"output_cost_per_million" db:"output_cost_per_million"`
+	ID                    uuid.UUID       `json:"id" db:"id"`
+	ModelID               string          `json:"model_id" db:"model_id"`
+	Provider              string          `json:"provider" db:"provider"`
+	InputCostPerMillion   float64         `json:"input_cost_per_million" db:"input_cost_per_million"`
+	OutputCostPerMillion  float64         `json:"output_cost_per_million" db:"output_cost_per_million"`
 	CacheReadCostMillion  sql.NullFloat64 `json:"cache_read_cost_million,omitempty" db:"cache_read_cost_million"`
 	CacheWriteCostMillion sql.NullFloat64 `json:"cache_write_cost_million,omitempty" db:"cache_write_cost_million"`
-	ModelPattern          sql.NullString `json:"model_pattern,omitempty" db:"model_pattern"`
-	EffectiveDate         time.Time      `json:"effective_date" db:"effective_date"`
-	CreatedAt             time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt             time.Time      `json:"updated_at" db:"updated_at"`
+	ModelPattern          sql.NullString  `json:"model_pattern,omitempty" db:"model_pattern"`
+	EffectiveDate         time.Time       `json:"effective_date" db:"effective_date"`
+	CreatedByUserID       sql.NullString  `json:"created_by_user_id,omitempty" db:"created_by_user_id"`
+	CreatedByEmail        sql.NullString  `json:"created_by_email,omitempty" db:"created_by_email"`
+	CreatedAt             time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt             time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // BudgetDefinition represents a budget configuration.
@@ -56,12 +58,20 @@ type BudgetDefinition struct {
 	Isolated            bool           `json:"isolated" db:"isolated"`
 	AllowFallback       bool           `json:"allow_fallback" db:"allow_fallback"`
 	Enabled             bool           `json:"enabled" db:"enabled"`
+	DisabledByUserID    sql.NullString `json:"disabled_by_user_id,omitempty" db:"disabled_by_user_id"`
+	DisabledByEmail     sql.NullString `json:"disabled_by_email,omitempty" db:"disabled_by_email"`
+	DisabledByIsOrg     bool           `json:"disabled_by_is_org" db:"disabled_by_is_org"`
+	DisabledAt          sql.NullTime   `json:"disabled_at,omitempty" db:"disabled_at"`
 	CurrentPeriodStart  time.Time      `json:"current_period_start" db:"current_period_start"`
 	CurrentUsageUSD     float64        `json:"current_usage_usd" db:"current_usage_usd"`
 	PendingUsageUSD     float64        `json:"pending_usage_usd" db:"pending_usage_usd"`
 	Description         sql.NullString `json:"description,omitempty" db:"description"`
 	OwnerOrgID          sql.NullString `json:"owner_org_id,omitempty" db:"owner_org_id"`
 	OwnerTeamID         sql.NullString `json:"owner_team_id,omitempty" db:"owner_team_id"`
+	ApprovalStatus      ApprovalStatus `json:"approval_status" db:"approval_status"`
+	CreatedByUserID     sql.NullString `json:"created_by_user_id,omitempty" db:"created_by_user_id"`
+	CreatedByEmail      sql.NullString `json:"created_by_email,omitempty" db:"created_by_email"`
+	RejectionCount      int            `json:"rejection_count" db:"rejection_count"`
 	Version             int64          `json:"version" db:"version"`
 	CreatedAt           time.Time      `json:"created_at" db:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at" db:"updated_at"`
@@ -69,15 +79,15 @@ type BudgetDefinition struct {
 
 // UsageRecord represents a single usage record.
 type UsageRecord struct {
-	ID           uuid.UUID `json:"id" db:"id"`
-	BudgetID     uuid.UUID `json:"budget_id" db:"budget_id"`
-	RequestID    string    `json:"request_id" db:"request_id"`
-	ModelID      string    `json:"model_id" db:"model_id"`
-	InputTokens  int64     `json:"input_tokens" db:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens" db:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd" db:"cost_usd"`
-	ParentCharged bool     `json:"parent_charged" db:"parent_charged"`
-	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	ID            uuid.UUID `json:"id" db:"id"`
+	BudgetID      uuid.UUID `json:"budget_id" db:"budget_id"`
+	RequestID     string    `json:"request_id" db:"request_id"`
+	ModelID       string    `json:"model_id" db:"model_id"`
+	InputTokens   int64     `json:"input_tokens" db:"input_tokens"`
+	OutputTokens  int64     `json:"output_tokens" db:"output_tokens"`
+	CostUSD       float64   `json:"cost_usd" db:"cost_usd"`
+	ParentCharged bool      `json:"parent_charged" db:"parent_charged"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 }
 
 // RequestReservation represents a pending budget reservation.

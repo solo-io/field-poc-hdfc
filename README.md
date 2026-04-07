@@ -29,11 +29,13 @@ All scenarios run on **Kubernetes** with **Enterprise Agentgateway** installed.
 
 ### 1. LLM Body-Based Routing
 
-Route requests to different LLM backends based on the `model` field in the request body. An `EnterpriseAgentgatewayPolicy` promotes the model name into a header at `PreRouting`; standard `HTTPRoute` header-match rules dispatch to the correct backend. Two configs are provided:
+Route requests to different LLM backends based on the `model` field in the request body. An `EnterpriseAgentgatewayPolicy` promotes the model name into a header at `PreRouting`; standard `HTTPRoute` header-match rules dispatch to the correct backend. The following configs are provided under [`01-llm-routing/config/`](./01-llm-routing/config/):
 
 - **`bbr.yaml`** — Chat completions: Vertex AI (Gemini 2.5 Flash) vs local Ollama (Llama 3) on `/chat`
 - **`bbr-embeddings.yaml`** — Embeddings: OpenAI (`text-embedding-3-small`) vs local Ollama (`bge-m3`) on `/embeddings`
 - **`bbr-single-endpoint.yaml`** — Single-endpoint routing: chat and embeddings backends (Vertex AI, Ollama, OpenAI) unified under a single `/common` endpoint with body-based model dispatch
+- **`routing-stt.yaml`** — OpenAI speech-to-text (`whisper-1`): `/v1/audio/transcriptions` passthrough; clients call `/openai` on the gateway (prefix rewrite to OpenAI)
+- **`routing-tts.yaml`** — OpenAI text-to-speech (`gpt-4o-mini`): `/v1/audio/speech` passthrough; clients call `/openai` on the gateway (prefix rewrite to OpenAI)
 
 → [`01-llm-routing/`](./01-llm-routing/)
 

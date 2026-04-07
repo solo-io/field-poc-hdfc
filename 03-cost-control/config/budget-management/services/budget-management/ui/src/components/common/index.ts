@@ -8,3 +8,5 @@ export * from './ConfirmDialog';
 export * from './ProgressBar';
 export * from './Badge';
 export * from './Spinner';
+export * from './Pagination';
+export * from './Tooltip';
