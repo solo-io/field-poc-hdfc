@@ -1,8 +1,8 @@
-# 01 — LLM Body-Based Routing
+# 01 — LLM Routing Patterns
 
-Route incoming requests to different LLM backends based on the **`model` field in the JSON request body**. An `EnterpriseAgentgatewayPolicy` extracts the model name into a request header at the PreRouting phase; standard Gateway API `HTTPRoute` rules then match on that header to dispatch to the correct backend.
+This module demonstrates multiple gateway routing patterns for LLM and AI APIs. It includes **body-based model routing** for chat/embeddings, **OpenAI audio passthrough** with prefix rewrite, and **multi-realm JWT validation** for org-aware request handling.
 
-**Scenarios A–C** follow that pattern. **Scenarios D–E** use [`config/routing-stt.yaml`](./config/routing-stt.yaml) and [`config/routing-tts.yaml`](./config/routing-tts.yaml): OpenAI Audio APIs behind a single gateway prefix with `Passthrough` routes and a `URLRewrite` (no body-to-header policy).
+**Scenarios A–C** use body-to-header extraction with `EnterpriseAgentgatewayPolicy`. **Scenarios D–E** use [`config/routing-stt.yaml`](./config/routing-stt.yaml) and [`config/routing-tts.yaml`](./config/routing-tts.yaml): OpenAI Audio APIs behind a single gateway prefix with `Passthrough` routes and a `URLRewrite`. **Scenario F** uses [`config/multi-realm-validation.yaml`](./config/multi-realm-validation.yaml) for strict multi-issuer JWT authentication and claim propagation.
 
 > This setup targets **Enterprise Agentgateway on Kubernetes** using the Gateway API (`gateway.networking.k8s.io`).
 
@@ -377,11 +377,12 @@ curl http://<GATEWAY_IP>:8080/org-routing/echo \
 
 ## Key Takeaways
 
-- `EnterpriseAgentgatewayPolicy` with `phase: PreRouting` is the mechanism for body-based routing — it lifts the `model` field out of the JSON body into a header so standard Gateway API header matching can do the dispatching.
+- For Scenarios A–C, `EnterpriseAgentgatewayPolicy` with `phase: PreRouting` drives body-based model routing by lifting the `model` field out of the JSON body into a header for standard Gateway API header matching.
 - `X-Gateway-Model-Status: unspecified` provides a zero-config fallback: requests that omit the `model` field are automatically caught and sent to a group backend.
 - Embedding backends use `Passthrough` for all routes and a `URLRewrite` filter to remove the path prefix before forwarding to the provider.
 - `ai.groups` in the fallback backend enables provider-level redundancy (priority ordering) with no extra infrastructure.
 - OpenAI STT/TTS configs (`routing-stt.yaml`, `routing-tts.yaml`) use **only** `HTTPRoute` + `AgentgatewayBackend`: `Passthrough` on the audio path and a prefix strip from `/openai` to `/` — no `EnterpriseAgentgatewayPolicy`.
+- `multi-realm-validation.yaml` shows strict JWT validation across multiple Keycloak issuers and projects token claims (`org_id`, `team_id`) into headers for downstream policy/routing decisions.
 
 ## Prerequisites
 

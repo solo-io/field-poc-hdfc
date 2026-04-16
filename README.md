@@ -6,7 +6,7 @@ This is a proof-of-concept for a customer POC. It is not intended to be a produc
 
 | # | Scenario | Key Feature(s) | Status | Directory |
 |---|----------|----------------|--------|-----------|
-| 1 | [LLM Body-Based Routing](#1-llm-body-based-routing) | Body-based routing, multi-provider dispatch | ✅ Ready | [`01-llm-routing/`](./01-llm-routing/) |
+| 1 | [LLM Routing Patterns](#1-llm-routing-patterns) | Body-based model routing, audio passthrough, multi-realm JWT validation | ✅ Ready | [`01-llm-routing/`](./01-llm-routing/) |
 | 2 | [Prompt Guarding](#2-prompt-guarding) | Webhook guard + Opik evaluation & tracing | ✅ Ready | [`02-prompt-guard/`](./02-prompt-guard/) |
 | 3 | [Cost Control & Rate Limits](#3-cost-control--rate-limits) | Cost control, budget management, ext-proc enforcement | ✅ Ready | [`03-cost-control/`](./03-cost-control/) |
 | 4 | [Authentication & RBAC](#4-authentication--rbac) | OIDC/Keycloak, JWT auth, workload identity, CEL RBAC | ✅ Ready | [`04-auth/`](./04-auth/) |
@@ -27,9 +27,9 @@ All scenarios run on **Kubernetes** with **Enterprise Agentgateway** installed.
 
 ## Scenario Summaries
 
-### 1. LLM Body-Based Routing
+### 1. LLM Routing Patterns
 
-Route requests to different LLM backends based on the `model` field in the request body. An `EnterpriseAgentgatewayPolicy` promotes the model name into a header at `PreRouting`; standard `HTTPRoute` header-match rules dispatch to the correct backend. The following configs are provided under [`01-llm-routing/config/`](./01-llm-routing/config/):
+Demonstrates multiple gateway routing patterns for LLM and AI APIs: body-based model routing, OpenAI audio passthrough with URL rewrite, and multi-realm JWT validation with claim propagation. The following configs are provided under [`01-llm-routing/config/`](./01-llm-routing/config/):
 
 - **`bbr.yaml`** — Chat completions: Vertex AI (Gemini 2.5 Flash) vs local Ollama (Llama 3) on `/chat`
 - **`bbr-embeddings.yaml`** — Embeddings: OpenAI (`text-embedding-3-small`) vs local Ollama (`bge-m3`) on `/embeddings`
