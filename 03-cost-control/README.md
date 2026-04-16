@@ -8,12 +8,10 @@ This demo showcases Agent Gateway's cost control capabilities using a quota mana
 
 ## Architecture
 
-![](./images/overview.png)
-
 ```mermaid
 graph LR
     client([AI Client])
-    agw[agentgateway\nkgateway + Envoy]
+    agw[agentgateway]
     llm([LLM Provider])
     ui[Management UI]
 
