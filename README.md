@@ -36,6 +36,7 @@ Route requests to different LLM backends based on the `model` field in the reque
 - **`bbr-single-endpoint.yaml`** — Single-endpoint routing: chat and embeddings backends (Vertex AI, Ollama, OpenAI) unified under a single `/common` endpoint with body-based model dispatch
 - **`routing-stt.yaml`** — OpenAI speech-to-text (`whisper-1`): `/v1/audio/transcriptions` passthrough; clients call `/openai` on the gateway (prefix rewrite to OpenAI)
 - **`routing-tts.yaml`** — OpenAI text-to-speech (`gpt-4o-mini`): `/v1/audio/speech` passthrough; clients call `/openai` on the gateway (prefix rewrite to OpenAI)
+- **`multi-realm-validation.yaml`** — Multi-realm JWT validation with Keycloak (org-specific issuers) and claim-to-header propagation for downstream org/team-aware routing
 
 → [`01-llm-routing/`](./01-llm-routing/)
 

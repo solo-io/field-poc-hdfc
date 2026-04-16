@@ -344,6 +344,37 @@ curl http://<GATEWAY_IP>:8080/openai/v1/audio/speech \
 
 ---
 
+## Scenario F — Multi-Realm JWT Validation (Keycloak)
+
+**Config:** [`config/multi-realm-validation.yaml`](./config/multi-realm-validation.yaml)
+
+Validates JWTs from multiple Keycloak realms on a shared gateway (`org-acme`, `org-globex`, `org-initech`, `org-umbrella`) using a single `EnterpriseAgentgatewayPolicy` in `PreRouting`. The policy accepts tokens from all configured issuers and propagates key claims to request headers (`x-gw-org-id`, `x-gw-team-id`) for downstream org/team-aware authorization and routing.
+
+### Resources
+
+| Resource | Kind | Purpose |
+|----------|------|---------|
+| `agentgateway` | `Gateway` | Shared HTTP entry point on port `8080` |
+| `keycloak-jwks` | `AgentgatewayBackend` | TLS-enabled backend for fetching realm JWKS from Keycloak |
+| `echo-backend` | `Deployment` + `Service` | Simple upstream target to verify authenticated requests |
+| `echo-backend` | `HTTPRoute` | Routes `/org-routing/echo` to the test backend (with path rewrite) |
+| `multi-org-jwt-auth-agentgateway` | `EnterpriseAgentgatewayPolicy` | Enforces strict JWT auth across multiple issuers and sets org/team headers from claims |
+
+### Apply
+
+```bash
+kubectl apply -f config/multi-realm-validation.yaml
+```
+
+### Test
+
+```bash
+curl http://<GATEWAY_IP>:8080/org-routing/echo \
+  -H "Authorization: Bearer <ACCESS_TOKEN_FROM_ANY_CONFIGURED_REALM>"
+```
+
+---
+
 ## Key Takeaways
 
 - `EnterpriseAgentgatewayPolicy` with `phase: PreRouting` is the mechanism for body-based routing — it lifts the `model` field out of the JSON body into a header so standard Gateway API header matching can do the dispatching.

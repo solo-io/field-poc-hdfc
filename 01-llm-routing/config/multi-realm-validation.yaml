@@ -1,0 +1,200 @@
+# --- Default Gateway (referenced by HTTPRoutes below) ---
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+
+# --- Feature: multi-org-jwt-auth ---
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: keycloak-jwks
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: multi-org-jwt-auth
+spec:
+  policies:
+    tls:
+      sni: keycloak.demo.kasunt.apac.fe.solo.io
+  static:
+    host: keycloak.demo.kasunt.apac.fe.solo.io
+    port: 443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-backend
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: multi-org-jwt-auth
+    app: echo-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-backend
+  template:
+    metadata:
+      labels:
+        app: echo-backend
+        agentgateway.dev/feature: multi-org-jwt-auth
+    spec:
+      containers:
+        - name: httpbin
+          image: kennethreitz/httpbin
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-backend
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: multi-org-jwt-auth
+spec:
+  selector:
+    app: echo-backend
+  ports:
+    - port: 80
+      targetPort: 80
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-backend
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: multi-org-jwt-auth
+spec:
+  parentRefs:
+    - name: agentgateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /org-routing/echo
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /headers
+      backendRefs:
+        - name: echo-backend
+          port: 80
+
+
+# --- Merged EnterpriseAgentgatewayPolicy Resources ---
+# The following policies were merged from multiple features:
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: multi-org-jwt-auth-agentgateway
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: multi-org-jwt-auth
+    agentgateway.dev/merged-policy: "true"
+    agentgateway.dev/contributors: multi-org-jwt-auth
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway
+  traffic:
+    phase: PreRouting
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: https://keycloak.demo.kasunt.apac.fe.solo.io/realms/org-acme
+          audiences:
+            - account
+          jwks:
+            remote:
+              jwksPath: realms/org-acme/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: agentgateway.dev
+                kind: AgentgatewayBackend
+                name: keycloak-jwks
+                namespace: agentgateway-system
+        - issuer: https://keycloak.demo.kasunt.apac.fe.solo.io/realms/org-globex
+          audiences:
+            - account
+          jwks:
+            remote:
+              jwksPath: realms/org-globex/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: agentgateway.dev
+                kind: AgentgatewayBackend
+                name: keycloak-jwks
+                namespace: agentgateway-system
+        - issuer: https://keycloak.demo.kasunt.apac.fe.solo.io/realms/org-initech
+          audiences:
+            - account
+          jwks:
+            remote:
+              jwksPath: realms/org-initech/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: agentgateway.dev
+                kind: AgentgatewayBackend
+                name: keycloak-jwks
+                namespace: agentgateway-system
+        - issuer: https://keycloak.demo.kasunt.apac.fe.solo.io/realms/org-umbrella
+          audiences:
+            - account
+          jwks:
+            remote:
+              jwksPath: realms/org-umbrella/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: agentgateway.dev
+                kind: AgentgatewayBackend
+                name: keycloak-jwks
+                namespace: agentgateway-system
+    transformation:
+      request:
+        set:
+          - name: x-gw-org-id
+            value: jwt['org_id']
+          - name: x-gw-team-id
+            value: jwt['team_id']
