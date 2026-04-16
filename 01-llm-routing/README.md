@@ -2,7 +2,11 @@
 
 This module demonstrates multiple gateway routing patterns for LLM and AI APIs. It includes **body-based model routing** for chat/embeddings, **OpenAI audio passthrough** with prefix rewrite, and **multi-realm JWT validation** for org-aware request handling.
 
-**Scenarios A–C** use body-to-header extraction with `EnterpriseAgentgatewayPolicy`. **Scenarios D–E** use [`config/routing-stt.yaml`](./config/routing-stt.yaml) and [`config/routing-tts.yaml`](./config/routing-tts.yaml): OpenAI Audio APIs behind a single gateway prefix with `Passthrough` routes and a `URLRewrite`. **Scenario F** uses [`config/multi-realm-validation.yaml`](./config/multi-realm-validation.yaml) for strict multi-issuer JWT authentication and claim propagation.
+Scenario map:
+
+- **Scenarios A–C:** Body-to-header extraction with `EnterpriseAgentgatewayPolicy` for model-based routing.
+- **Scenarios D–E:** OpenAI Audio APIs via [`config/routing-stt.yaml`](./config/routing-stt.yaml) and [`config/routing-tts.yaml`](./config/routing-tts.yaml), using `Passthrough` routes plus `URLRewrite`.
+- **Scenario F:** [`config/multi-realm-validation.yaml`](./config/multi-realm-validation.yaml) for strict multi-issuer JWT authentication and claim propagation.
 
 > This setup targets **Enterprise Agentgateway on Kubernetes** using the Gateway API (`gateway.networking.k8s.io`).
 
