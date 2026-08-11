@@ -1,0 +1,321 @@
+# --- Default Gateway (referenced by HTTPRoutes below) ---
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway-gw
+  namespace: agentgateway-system
+  labels:
+    app: agentgateway
+spec:
+  gatewayClassName: enterprise-agentgateway
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+# --- Feature: providers ---
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayBackend
+metadata:
+  name: openai-gpt4o
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai-gpt4o
+    agentgateway.dev/feature: providers
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-4o
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set OPENAI_API_KEY>
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayBackend
+metadata:
+  name: openai-gpt35
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: openai-gpt35
+    agentgateway.dev/feature: providers
+spec:
+  ai:
+    provider:
+      openai:
+        model: gpt-3.5-turbo
+  policies:
+    auth:
+      secretRef:
+        name: openai-secret
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: anthropic-secret
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: providers
+stringData:
+  Authorization: <set ANTHROPIC_API_KEY>
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayBackend
+metadata:
+  name: anthropic-claude35
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: anthropic-claude35
+    agentgateway.dev/feature: providers
+spec:
+  ai:
+    provider:
+      anthropic:
+        model: claude-sonnet-5
+  policies:
+    auth:
+      secretRef:
+        name: anthropic-secret
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: providers-chat-route
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/provider: provider-name
+    agentgateway.dev/feature: providers
+    agentgateway.dev/mode: body-routing
+spec:
+  parentRefs:
+    - name: agentgateway-gw
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            value: /chat
+          headers:
+            - name: X-Gateway-Model-Name
+              value: gpt-4o
+      backendRefs:
+        - name: openai-gpt4o
+          namespace: agentgateway-system
+          group: enterpriseagentgateway.solo.io
+          kind: EnterpriseAgentgatewayBackend
+    - matches:
+        - path:
+            value: /chat
+          headers:
+            - name: X-Gateway-Model-Name
+              value: gpt-3.5-turbo
+      backendRefs:
+        - name: openai-gpt35
+          namespace: agentgateway-system
+          group: enterpriseagentgateway.solo.io
+          kind: EnterpriseAgentgatewayBackend
+    - matches:
+        - path:
+            value: /chat
+          headers:
+            - name: X-Gateway-Model-Name
+              value: claude-sonnet-5
+      backendRefs:
+        - name: anthropic-claude35
+          namespace: agentgateway-system
+          group: enterpriseagentgateway.solo.io
+          kind: EnterpriseAgentgatewayBackend
+
+# --- Feature: keycloak-jwt-auth ---
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayBackend
+metadata:
+  name: keycloak-jwks
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: keycloak-jwt-auth
+spec:
+  policies:
+    tls:
+      sni: keycloak.demo.kasunt.apac.fe.solo.io
+  static:
+    host: keycloak.demo.kasunt.apac.fe.solo.io
+    port: 443
+
+# --- Feature: openfga-authz ---
+# ext_authz backed by https://github.com/day0ops/openfga-ext-authz
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openfga-ext-authz
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: openfga-authz
+    app: openfga-ext-authz
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openfga-ext-authz
+  template:
+    metadata:
+      labels:
+        app: openfga-ext-authz
+    spec:
+      containers:
+        - name: openfga-ext-authz
+          image: australia-southeast1-docker.pkg.dev/field-engineering-apac/kasunt/openfga-ext-authz:latest
+          ports:
+            - containerPort: 9001
+              name: grpc
+          env:
+            - name: PORT
+              value: '9001'
+            - name: OPENFGA_API_URL
+              value: http://openfga.openfga.svc.cluster.local:8080
+            - name: OPENFGA_STORE_ID
+              value: <STORE_ID>
+            - name: OPENFGA_MODEL_ID
+              value: <MODEL_ID>
+            - name: OPENFGA_RELATION
+              value: can_use
+            - name: USER_HEADER
+              value: x-user-id
+            - name: OBJECT_TYPE
+              value: model
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openfga-ext-authz
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: openfga-authz
+spec:
+  selector:
+    app: openfga-ext-authz
+  ports:
+    - port: 9001
+      targetPort: 9001
+      name: grpc
+
+# --- Merged EnterpriseAgentgatewayPolicy Resources ---
+# The following policies were merged from multiple features:
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: merged-providers-keycloak-jwt-auth-agentgateway-gw
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: keycloak-jwt-auth
+    agentgateway.dev/merged-policy: 'true'
+    agentgateway.dev/contributors: providers_keycloak-jwt-auth
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway-gw
+  traffic:
+    phase: PreRouting
+    transformation:
+      request:
+        set:
+          - name: X-Gateway-Model-Name
+            value: json(request.body).model
+          - name: x-user-id
+            value: jwt['preferred_username']
+    jwtAuthentication:
+      mode: Strict
+      providers:
+        - issuer: https://keycloak.demo.kasunt.apac.fe.solo.io/realms/agw-dev
+          audiences:
+            - account
+          jwks:
+            remote:
+              jwksPath: realms/agw-dev/protocol/openid-connect/certs
+              cacheDuration: 5m
+              backendRef:
+                group: enterpriseagentgateway.solo.io
+                kind: EnterpriseAgentgatewayBackend
+                name: keycloak-jwks
+                namespace: agentgateway-system
+
+---
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: openfga-authz-providers-chat-route
+  namespace: agentgateway-system
+  labels:
+    app.kubernetes.io/managed-by: agentgateway-demo
+    agentgateway.dev/feature: openfga-authz
+    agentgateway.dev/merged-policy: 'true'
+    agentgateway.dev/contributors: openfga-authz
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: providers-chat-route
+  traffic:
+    extAuth:
+      backendRef:
+        name: openfga-ext-authz
+        namespace: agentgateway-system
+        port: 9001
+      grpc: {}
+      forwardBody:
+        maxSize: 8192

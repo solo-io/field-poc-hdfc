@@ -12,6 +12,8 @@ This is a proof-of-concept for a customer POC. It is not intended to be a produc
 | 4 | [Authentication & RBAC](#4-authentication--rbac) | OIDC/Keycloak, JWT auth, workload identity, CEL RBAC | ✅ Ready | [`04-auth/`](./04-auth/) |
 | 5 | [Microsoft Entra ID](#5-microsoft-entra-id) | Azure AD / Entra ID integration | 🔜 Planned | [`05-entra-id/`](./05-entra-id/) |
 | 6 | [Observability](#6-observability) | Grafana dashboards, cost estimation, budget monitoring | ✅ Ready | [`06-observability/`](./06-observability/) |
+| 7 | [Fine-Grained Authorization with OpenFGA](#7-fine-grained-authorization-with-openfga) | ReBAC authorization, Keycloak JWT auth, ext_authz | ✅ Ready | [`07-openfga-authz/`](./07-openfga-authz/) |
+| 8 | [Native Cost Control, Budgets & Fine-Grained Authorization](#8-native-cost-control-budgets--fine-grained-authorization) | Native budget/cost CRDs, virtual keys, rate limits, OpenFGA authz | ✅ Ready | [`08-native-cost-control/`](./08-native-cost-control/) |
 
 ---
 
@@ -107,6 +109,31 @@ Pre-built Grafana dashboards for monitoring Agent Gateway:
 
 → [`06-observability/`](./06-observability/)
 
+### 7. Fine-Grained Authorization with OpenFGA
+
+Externalized, fine-grained authorization for LLM access using [OpenFGA](https://openfga.dev), a Zanzibar-style relationship-based access control (ReBAC) server. Every chat request must pass **both** strict Keycloak JWT authentication and an OpenFGA `Check` (via an `ext_authz` gRPC service) before reaching the model provider — an authenticated user can still be denied access to a specific model.
+
+**Key Features:**
+- Body-based model routing (`X-Gateway-Model-Name` derived from the request body)
+- Strict JWT authentication via Keycloak, with claim-to-header propagation (`jwt['preferred_username']` → `x-user-id`)
+- External authorization (`ext_authz`) against OpenFGA's `Check` API, scoped to the chat route
+- Uses [day0ops/openfga-ext-authz](https://github.com/day0ops/openfga-ext-authz) as the `ext_authz` bridge between agentgateway and OpenFGA
+
+→ [`07-openfga-authz/`](./07-openfga-authz/)
+
+### 8. Native Cost Control, Budgets & Fine-Grained Authorization
+
+Cost and access control built entirely on native Enterprise Agentgateway CRDs — no custom ext-proc service or database required. Combines a model cost catalog, hierarchical budget enforcement, virtual API keys, global burst rate limiting, and OpenFGA-based fine-grained authorization on a single set of routes. Contrast with [`03-cost-control/`](./03-cost-control/), which uses a custom ext-proc microservice backed by PostgreSQL.
+
+**Key Features:**
+- Model cost catalog via `EnterpriseAgentgatewayParameters`, attached to the Gateway through `spec.infrastructure.parametersRef`
+- Hierarchical, subject-scoped budgets (org/team/user/virtual-key) via `EnterpriseAgentgatewayBudget`
+- Virtual API keys with per-key rate limiting, plus a global burst rate limit on the route
+- Optional JWT **or** API-key authentication with identity fallback (`coalesce(jwt[...], apiKey[...])`)
+- OpenFGA-based `ext_authz` fine-grained authorization, again via [day0ops/openfga-ext-authz](https://github.com/day0ops/openfga-ext-authz)
+
+→ [`08-native-cost-control/`](./08-native-cost-control/)
+
 ---
 
 ## Reference Links
@@ -115,3 +142,5 @@ Pre-built Grafana dashboards for monitoring Agent Gateway:
 - [Configuration schema](https://agentgateway.dev/schema/config)
 - [CEL expression reference](https://agentgateway.dev/docs/standalone/main/reference/cel)
 - [Supported LLM providers](https://agentgateway.dev/docs/standalone/main/)
+- [OpenFGA documentation](https://openfga.dev/docs)
+- [day0ops/openfga-ext-authz](https://github.com/day0ops/openfga-ext-authz) — OpenFGA `ext_authz` gRPC service used in scenarios 7 and 8
